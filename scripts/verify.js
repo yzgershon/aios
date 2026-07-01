@@ -3,7 +3,7 @@
  * AIOS verification harness — drives headless Chrome over raw CDP (no puppeteer).
  * Usage: node scripts/verify.js [baseUrl]   (default http://127.0.0.1:3210)
  * Walks every page, collects console errors / exceptions / failed requests,
- * screenshots each page to rebuild/shots/, prints a JSON summary, exit 1 on errors.
+ * screenshots each page to scripts/shots/, prints a JSON summary, exit 1 on errors.
  */
 const http = require('http');
 const os = require('os');
@@ -15,7 +15,7 @@ const WebSocket = require('ws');
 const BASE = process.argv[2] || 'http://127.0.0.1:3000';
 const PORT = 9333;
 const PAGES = ['dashboard', 'pipeline', 'portfolio', 'ads', 'goals', 'brain'];
-const SHOTS = path.join(__dirname, '..', 'rebuild', 'shots');
+const SHOTS = path.join(__dirname, 'shots');
 const CHROME = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
