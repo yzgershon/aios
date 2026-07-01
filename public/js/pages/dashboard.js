@@ -105,6 +105,7 @@
       </article>`;
     bindEvents(el);
     renderTodo();
+    loadTodoSeeds();
     renderBrief({ status: 'loading' });
     loadBrief();
   }
@@ -820,21 +821,21 @@
   // =========================================================================
   // TO-DO (ported — same localStorage key, his checks survive)
   // =========================================================================
-  const TODO_SEED = [
-    { id: 'nextdoor', tag: 'biz', title: 'Point Nextdoor notifications at the leads inbox', sub: 'so detailing leads auto-flow into Local Demand (yddetailers.leads@gmail.com).' },
-    { id: 'meta', tag: 'biz', title: 'Launch your first Meta ad — $10–15/day', sub: 'Local lead gen, Newton +5mi. Plan is on the Advertisements page.' },
-    { id: 'pixel', tag: 'biz', title: 'Install the Meta Pixel on yddetailers.com', sub: 'track + retarget bookings — ask me for the snippet.' },
-    { id: 'lead1h', tag: 'biz', title: 'Reply to every new lead within an hour', sub: 'fastest reply usually wins the booking.' },
-    { id: 'post3', tag: 'biz', title: 'Post 3 short-form detailing videos this week', sub: 'before/after reveals convert best — steal from Trending.' },
-    { id: 'shares', tag: 'money', title: 'Add real share counts to the Portfolio', sub: 'so net worth + gains read accurately.' },
-    { id: 'apush', tag: 'school', title: 'APUSH research paper — Depression vs Recession', sub: 'Chicago citations; comparative financial-regulation angle.' },
-    { id: 'exams', tag: 'school', title: 'Chip at AP Stats + APUSH exam prep', sub: 'exams May 2026 — a little each week beats cramming.' },
-    { id: 'train', tag: 'me', title: 'Train + recover this week', sub: 'Surf NE + school season — protect the body.' },
-  ];
+  // Seeds live server-side in ~/.aios/todos.json (GET /api/todos) so updating
+  // them is a data edit, not a code edit. Checks/custom/hidden stay in
+  // localStorage exactly as before.
+  let todoSeed = [];
+  async function loadTodoSeeds() {
+    try {
+      const r = await AIOS.api.get('/api/todos');
+      todoSeed = Array.isArray(r.items) ? r.items : [];
+    } catch { todoSeed = []; }
+    renderTodo();
+  }
   const TODO_KEY = 'aios.todo.v1';
   let todoState = (() => { try { return Object.assign({ done: {}, custom: [], hidden: {}, expanded: {} }, JSON.parse(localStorage.getItem(TODO_KEY) || '{}')); } catch { return { done: {}, custom: [], hidden: {}, expanded: {} }; } })();
   const saveTodo = () => { try { localStorage.setItem(TODO_KEY, JSON.stringify(todoState)); } catch { /* ignore */ } };
-  const todoItems = () => TODO_SEED.concat(todoState.custom || []).filter((t) => !todoState.hidden[t.id]);
+  const todoItems = () => todoSeed.concat(todoState.custom || []).filter((t) => !todoState.hidden[t.id]);
   function renderTodo() {
     const body = $('todo-body'), count = $('todo-count'); if (!body) return;
     const items = todoItems();

@@ -86,6 +86,7 @@ const PIPELINE_FILE = path.join(AIOS_DATA_DIR, 'pipeline.json');
 const META_LEADS_SHEET_URL = (process.env.META_LEADS_SHEET_URL || '').trim();
 const GOALS_FILE = path.join(AIOS_DATA_DIR, 'goals.json');
 const BRIEF_FILE = path.join(AIOS_DATA_DIR, 'brief.json');
+const TODOS_FILE = path.join(AIOS_DATA_DIR, 'todos.json');
 const VAULT_DIR = (() => {
   const want = process.env.AIOS_VAULT_DIR || process.env.AIOS_CLAUDE_CWD;
   if (want && fs.existsSync(want)) return want;
@@ -1491,7 +1492,7 @@ async function getGoals() {
 // `cmd /s /c "..."` for the shim/name spawn kinds.
 // ---------------------------------------------------------------------------
 const BRIEF_PROMPT = "Write Yish's daily AIOS briefing. First check his Google Calendar for today's and tomorrow morning's events using the calendar tool if one is available - if the lookup fails or no calendar tool exists, skip it silently and never mention it. A LIVE MARKET DATA block with real numbers is appended at the end of this prompt - use ONLY those numbers for anything about the market or his stocks, never look prices up or invent them, and if the block is absent just skip the money line. Plain text only, no markdown syntax, max 160 words. Lead with what needs action today (calendar events with their times, YDdetailers leads/bookings, school, anything urgent in memory). Then one line each: SCHEDULE (today's events), BUSINESS (YDdetailers), MONEY (how the market is doing today AND a quick read on his portfolio - overall day change, all-time gain, and the single biggest mover - in plain words, not just numbers), PERSONAL. End with exactly one specific suggested next action. Be specific and direct, no filler, talk to him like a sharp assistant who knows his world.";
-const BRIEF_MODEL = 'claude-opus-4-8'; // pin the model - headless default was Fable 5 (now unavailable)
+const BRIEF_MODEL = 'claude-opus-4-8'; // pinned for consistent brief quality (headless default drifts with the CLI)
 const BRIEF_TIMEOUT = 3 * 60 * 1000;
 const BRIEF_STDOUT_CAP = 64 * 1024;
 let briefGenerating = false;
@@ -1840,6 +1841,35 @@ app.get('/api/data', async (req, res) => {
     localDemand: localDemand || { available: true, hasLeads: false, leads: [] },
     errors,
   });
+});
+
+// ---------------------------------------------------------------------------
+// Focus · To-Do seeds — live in ~/.aios/todos.json (data, not code) so
+// updating them never needs a code edit. Seeded once if the file is missing.
+// Checks/custom items stay client-side in localStorage, same as before.
+// ---------------------------------------------------------------------------
+const TODO_DEFAULTS = [
+  { id: 'post3', tag: 'biz', title: 'Post 3 short-form detailing videos this week', sub: 'before/after reveals convert best — steal from Trending.' },
+  { id: 'lead1h', tag: 'biz', title: 'Reply to every new lead within an hour', sub: 'fastest reply usually wins the booking.' },
+  { id: 'reviews', tag: 'biz', title: 'Ask every happy customer for a Google review', sub: 'reviews compound — one ask per completed job.' },
+  { id: 'julybook', tag: 'biz', title: 'Book out July — push a summer special on Nextdoor', sub: 'peak season; a full calendar now carries the fall.' },
+  { id: 'crmlog', tag: 'money', title: 'Log every job in the CRM same-day', sub: 'the revenue tiles are only as accurate as the CRM.' },
+  { id: 'precond', tag: 'me', title: 'Preseason conditioning', sub: 'Surf NE + Newton North season is coming — build the base now.' },
+  { id: 'collegelist', tag: 'school', title: 'Draft the college list', sub: 'senior year starts in September — a rough list this summer beats a rushed one in October.' },
+  { id: 'essay', tag: 'school', title: 'Brainstorm Common App essay angles', sub: 'jot moments that actually mattered — the businesses, soccer, the builds.' },
+];
+async function getTodos() {
+  try {
+    const j = JSON.parse(await fsp.readFile(TODOS_FILE, 'utf8'));
+    if (j && Array.isArray(j.items)) return j;
+  } catch { /* seed below */ }
+  const seeded = { updatedAt: new Date().toISOString(), items: TODO_DEFAULTS };
+  await writeJsonAtomic(TODOS_FILE, seeded).catch(() => { /* read-only fs — serve from memory */ });
+  return seeded;
+}
+app.get('/api/todos', async (req, res) => {
+  try { res.json(await getTodos()); }
+  catch (e) { res.status(500).json({ error: String((e && e.message) || e), items: [] }); }
 });
 
 app.get('/api/crm', async (req, res) => {
