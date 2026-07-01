@@ -95,7 +95,19 @@
     status.className = 'term-status' + (cls ? ' ' + cls : '');
   }
 
+  // The terminal is a real shell into the PC, so it's deliberately
+  // desktop-only: the server 403s WebSocket origins other than localhost.
+  // Detect remote (Tailscale/phone) access up front and say so instead of
+  // showing a dead "connection error".
+  const IS_REMOTE = !['localhost', '127.0.0.1', '[::1]', '::1'].includes(location.hostname);
+
   function startSession(skill) {
+    if (IS_REMOTE) {
+      setStatus('desktop-only', 'err');
+      expand();
+      if (term) { term.reset(); term.write('\x1b[38;5;244m[AIOS] The terminal is a real shell into the PC, so it only works at the desk (localhost).\r\nEverything else on the dashboard works fine from here.\x1b[0m\r\n'); }
+      return;
+    }
     if (!ptyAvailable) { setStatus('terminal unavailable', 'err'); return; }
     expand();
     if (currentWs) { try { currentWs.close(); } catch { /* gone */ } currentWs = null; }
