@@ -161,6 +161,18 @@
     renderIndices();
     const dot = $('pfLive');
     if (dot && livePortfolioData && livePortfolioData.live) dot.classList.add('on');
+    // stale-price indicator: if the freshest quote we hold is >10 min old,
+    // Yahoo is likely down and we're showing last-good disk prices — say so.
+    if (dot) {
+      let newest = 0;
+      for (const q of Object.values(liveQuotes)) {
+        if (q && q.asOf) { const t = new Date(q.asOf).getTime(); if (t > newest) newest = t; }
+      }
+      const stale = newest > 0 && Date.now() - newest > 10 * 60 * 1000;
+      dot.classList.toggle('stale', stale);
+      dot.title = stale ? 'prices as of ' + AIOS.fmt.ago(newest) + ' — quote feed unreachable' : 'live';
+      if (stale) dot.classList.remove('on');
+    }
     // in-session total sparkline
     if (livePortfolioData && livePortfolioData.live && livePortfolioData.totalValue > 0) {
       totalHistory.push(livePortfolioData.totalValue);

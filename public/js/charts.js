@@ -439,8 +439,12 @@
       const gap = Math.max(1.5, cell * 0.14);
       const sz = cell - gap;
       const today = new Date(); today.setHours(0, 0, 0, 0);
-      // end on the Saturday `aheadWeeks` past the current week (room for upcoming)
-      const end = new Date(today);
+      // window anchor — opts.backWeeks shifts the visible window into the past
+      // without breaking the "is this cell in the future?" check below
+      const anchor = new Date(today);
+      anchor.setDate(anchor.getDate() - (opts.backWeeks || 0) * 7);
+      // end on the Saturday `aheadWeeks` past the anchor week (room for upcoming)
+      const end = new Date(anchor);
       end.setDate(end.getDate() + (6 - end.getDay()) + aheadWeeks * 7);
       const start = new Date(end);
       start.setDate(start.getDate() - weeks * 7 + 1);

@@ -56,6 +56,7 @@
         </article>
         <article class="card" id="tile-revchart">
           <div class="card-head"><h2>Revenue · Trend</h2>
+            <button class="hero-nav" id="trendPrev" title="Back in time">‹</button><button class="hero-nav" id="trendNext" title="Forward" disabled>›</button><span class="card-count" id="trendRange"></span>
             <div class="seg" id="revValSeg" style="margin-left:auto">
               <button class="seg-btn active" data-revval="$">$</button>
               <button class="seg-btn" data-revval="%">%</button>
@@ -68,7 +69,7 @@
           <div class="card-body chart-card-body"><canvas id="revChart"></canvas></div>
         </article>
         <article class="card" id="tile-heatmap">
-          <div class="card-head"><h2>Bookings · Heatmap</h2><span class="card-count" id="heat-count"></span></div>
+          <div class="card-head"><h2>Bookings · Heatmap</h2><button class="hero-nav" id="heatPrev" title="Back in time">‹</button><button class="hero-nav" id="heatNext" title="Forward" disabled>›</button><span class="card-count" id="heat-count"></span></div>
           <div class="card-body chart-card-body"><canvas id="heatChart"></canvas></div>
         </article>
       </section>
@@ -102,12 +103,16 @@
       <article class="card" id="tile-todo">
         <div class="card-head"><h2>Focus · To-Do</h2><span class="card-count" id="todo-count"></span><button class="card-action" id="todoReset" title="Reset checks">reset</button></div>
         <div class="card-body" id="todo-body"></div>
-      </article>`;
+      </article>
+
+      <div class="fresh-strip" id="freshStrip" title="When each data source last succeeded"></div>`;
     bindEvents(el);
     renderTodo();
     loadTodoSeeds();
     renderBrief({ status: 'loading' });
     loadBrief();
+    loadNwHistory();
+    loadFreshness();
   }
 
   const safe = (fn) => { try { fn(); } catch (e) { console.error('dash tile:', e); } };
@@ -122,6 +127,7 @@
     safe(() => renderComments(data.comments));
     safe(() => { if (!editing.mrr) renderNetWorth(data); });
     safe(() => detectFreshLeads(data));
+    safe(() => loadFreshness()); // rides the 5-min data poll
   }
 
   // =========================================================================
@@ -426,7 +432,59 @@
     const sub = total <= 0
       ? 'tap edit to set bike + bank'
       : `Bike ${sym}${abbrev(nw.motorcycle || 0)} · Bank ${sym}${abbrev(nw.cash || 0)}${savingsBit} · Stocks ${sym}${abbrev(Math.round(nw.stocks || 0))}`;
-    body.innerHTML = `<div class="kpi-value money">${total <= 0 ? value : esc(value)}</div><div class="kpi-sub">${esc(sub)}</div>`;
+    body.innerHTML = `<div class="kpi-value money">${total <= 0 ? value : esc(value)}</div><div class="kpi-sub">${esc(sub)}</div><canvas class="kpi-spark" id="nwSpark"></canvas>`;
+    drawNwSpark(total);
+  }
+
+  // Net-worth sparkline — daily snapshots from the server plus today's live
+  // total, so the tile shows where the number has been, not just where it is.
+  let nwHistory = [];
+  async function loadNwHistory() {
+    try { const r = await AIOS.api.get('/api/networth/history'); nwHistory = Array.isArray(r.history) ? r.history : []; }
+    catch { nwHistory = []; }
+    if (lastData) renderNetWorth(lastData);
+  }
+  function drawNwSpark(liveTotal) {
+    const canvas = $('nwSpark'); if (!canvas) return;
+    const today = new Date().toISOString().slice(0, 10);
+    const pts = nwHistory.filter((h) => h && h.total > 0 && h.date !== today).map((h) => h.total);
+    if (liveTotal > 0) pts.push(liveTotal);
+    if (pts.length < 2) { canvas.style.display = 'none'; return; }
+    canvas.style.display = 'block';
+    const dpr = window.devicePixelRatio || 1;
+    const w = canvas.clientWidth || 180, h = 22;
+    canvas.width = Math.round(w * dpr); canvas.height = Math.round(h * dpr);
+    const ctx = canvas.getContext('2d'); ctx.scale(dpr, dpr);
+    const min = Math.min(...pts), max = Math.max(...pts);
+    const span = (max - min) || 1;
+    const x = (i) => 2 + (i / (pts.length - 1)) * (w - 4);
+    const y = (v) => h - 3 - ((v - min) / span) * (h - 7);
+    const up = pts[pts.length - 1] >= pts[0];
+    ctx.beginPath();
+    pts.forEach((v, i) => { i ? ctx.lineTo(x(i), y(v)) : ctx.moveTo(x(i), y(v)); });
+    ctx.strokeStyle = up ? 'rgba(48,209,88,0.85)' : 'rgba(255,69,58,0.85)';
+    ctx.lineWidth = 1.5; ctx.lineJoin = 'round'; ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(x(pts.length - 1), y(pts[pts.length - 1]), 2, 0, Math.PI * 2);
+    ctx.fillStyle = up ? '#30d158' : '#ff453a'; ctx.fill();
+  }
+
+  // Freshness strip — when each upstream source last actually succeeded.
+  const FRESH_SOURCES = [
+    ['crm', 'CRM'], ['quotes', 'Quotes'], ['youtube', 'YouTube'], ['trends', 'Trends'],
+    ['social', 'Social'], ['nextdoor', 'Nextdoor'], ['brief', 'Brief'],
+  ];
+  async function loadFreshness() {
+    const el = $('freshStrip'); if (!el) return;
+    let src = {};
+    try { const r = await AIOS.api.get('/api/freshness'); src = (r && r.sources) || {}; } catch { /* leave empty */ }
+    el.innerHTML = FRESH_SOURCES.map(([key, label]) => {
+      const ts = src[key];
+      const age = ts ? Date.now() - new Date(ts).getTime() : null;
+      const cls = age == null ? 'off' : (age < 2 * 3600e3 ? 'ok' : (age < 24 * 3600e3 ? 'warn' : 'bad'));
+      const when = ts ? timeAgo(ts) : 'never';
+      return `<span class="fresh-chip" title="${esc(label)} last succeeded: ${esc(when)}"><span class="fresh-dot ${cls}"></span>${esc(label)}<em>${esc(when)}</em></span>`;
+    }).join('');
   }
 
   let dashTimer = null, dashHoldings = [], dashBaselines = {}, liveQuotes = {};
@@ -696,31 +754,60 @@
   // NEW: revenue chart + bookings heatmap (from CRM bookings)
   // =========================================================================
   let revMode = 'month', revValMode = '$';
+  // window paging: 0 = window ends now; each step back = 1 month / 1 week
+  let revOffset = 0, heatOffset = 0;
   const isDone = (b) => b.status === 'completed' || !b.status;
   const bPrice = (b) => { const n = Number(b.price); return Number.isFinite(n) ? n : 0; };
+  function earliestBookingDate() {
+    let min = null;
+    for (const b of (businessData && businessData.bookings) || []) {
+      const d = (b.date || '').slice(0, 10);
+      if (/^\d{4}-\d{2}-\d{2}$/.test(d) && (min === null || d < min)) min = d;
+    }
+    return min;
+  }
   function renderRevChart() {
     const canvas = $('revChart');
     if (!canvas) return;
     const bookings = (businessData && businessData.bookings) || [];
     if (!bookings.length) { AIOS.charts.bars(canvas, [], {}); return; }
+    if (revOffset < 0) revOffset = 0;
     let items = [];
+    let windowStart = null, windowEnd = null; // for the range label + prev cap
     if (revMode === 'month') {
       for (let i = 5; i >= 0; i--) {
-        const d = new Date(); d.setDate(1); d.setMonth(d.getMonth() - i);
+        const d = new Date(); d.setDate(1); d.setMonth(d.getMonth() - i - revOffset);
         const ym = d.toISOString().slice(0, 7);
+        if (i === 5) windowStart = new Date(d);
+        if (i === 0) windowEnd = new Date(d);
         const v = bookings.filter((b) => (b.date || '').startsWith(ym) && isDone(b)).reduce((s, b) => s + bPrice(b), 0);
         items.push({ label: d.toLocaleDateString([], { month: 'short' }), value: v });
       }
     } else {
       const now = new Date(); now.setHours(0, 0, 0, 0);
-      const monday = new Date(now); monday.setDate(monday.getDate() - ((monday.getDay() + 6) % 7));
+      const monday = new Date(now); monday.setDate(monday.getDate() - ((monday.getDay() + 6) % 7) - revOffset * 7);
       for (let i = 7; i >= 0; i--) {
         const w0 = new Date(monday); w0.setDate(w0.getDate() - i * 7);
         const w1 = new Date(w0); w1.setDate(w1.getDate() + 7);
+        if (i === 7) windowStart = new Date(w0);
+        if (i === 0) windowEnd = new Date(w1);
         const a = w0.toISOString().slice(0, 10), b1 = w1.toISOString().slice(0, 10);
         const v = bookings.filter((b) => { const d = b.date || ''; return d >= a && d < b1 && isDone(b); }).reduce((s, b) => s + bPrice(b), 0);
         items.push({ label: (w0.getMonth() + 1) + '/' + w0.getDate(), value: v });
       }
+    }
+    // nav state + range label (only shown when looking at the past)
+    const range = $('trendRange'), tPrev = $('trendPrev'), tNext = $('trendNext');
+    if (range) {
+      range.textContent = revOffset > 0 && windowStart && windowEnd
+        ? windowStart.toLocaleDateString([], { month: 'short', year: '2-digit' }) + ' – ' + windowEnd.toLocaleDateString([], { month: 'short', year: '2-digit' })
+        : '';
+    }
+    if (tNext) tNext.disabled = revOffset <= 0;
+    if (tPrev) {
+      const earliest = earliestBookingDate();
+      // stop paging back once the window's END has moved past the oldest booking
+      tPrev.disabled = !!(earliest && windowEnd && windowEnd.toISOString().slice(0, 10) < earliest);
     }
     if (!items.some((it) => it.value > 0)) { AIOS.charts.bars(canvas, [], {}); return; }
     // bar HEIGHTS are always revenue; the $/% toggle switches the printed labels
@@ -756,11 +843,24 @@
       if (future) { e.upcoming = true; upTotal++; } else doneTotal++;
     }
     const hc = $('heat-count');
-    if (hc) hc.textContent = [doneTotal ? doneTotal + ' completed' : '', upTotal ? upTotal + ' upcoming' : ''].filter(Boolean).join(' · ');
+    if (heatOffset < 0) heatOffset = 0;
+    if (hc) {
+      hc.textContent = heatOffset > 0
+        ? 'window −' + (heatOffset * 4) + ' wk'
+        : [doneTotal ? doneTotal + ' completed' : '', upTotal ? upTotal + ' upcoming' : ''].filter(Boolean).join(' · ');
+    }
+    const hPrev = $('heatPrev'), hNext = $('heatNext');
+    if (hNext) hNext.disabled = heatOffset <= 0;
+    if (hPrev) {
+      const earliest = earliestBookingDate();
+      // window end ≈ today − heatOffset*4wk (+4 ahead); stop once it's past the oldest booking
+      const end = new Date(); end.setDate(end.getDate() - heatOffset * 28 + 28);
+      hPrev.disabled = !!(earliest && end.toISOString().slice(0, 10) < earliest);
+    }
     AIOS.charts.heatmap(
       canvas,
       Object.entries(byDay).map(([date, e]) => ({ date, count: e.count, upcoming: e.upcoming })),
-      { weeks: 13, aheadWeeks: 4, unit: 'bookings' },
+      { weeks: 13, aheadWeeks: 4, unit: 'bookings', backWeeks: heatOffset * 4 },
     );
   }
 
@@ -783,13 +883,46 @@
         `<div style="text-align:center"><button class="btn btn-ghost" id="briefGo">Retry</button></div>`;
       return;
     }
-    body.innerHTML = `<div class="brief-text">${esc(String(b.text || '').trim())}</div>` +
-      `<div class="brief-meta">Generated ${b.generatedAt ? esc(timeAgo(b.generatedAt)) : 'just now'}</div>`;
+    briefLatest = b;
+    briefIdx = 0;
+    paintBrief(b, 0);
     if (b.generatedAt && briefNotified && briefNotified !== b.generatedAt) {
       AIOS.notify({ id: 'brief:' + b.generatedAt, kind: 'system', title: 'Daily briefing ready', body: String(b.text || '').slice(0, 80), page: 'dashboard' });
       AIOS.sound('success');
     }
     if (b.generatedAt) briefNotified = b.generatedAt;
+  }
+
+  // Brief history pager — ‹ pages back through the last 14 briefs (server keeps
+  // them in ~/.aios/brief-history.json), › returns toward today.
+  let briefLatest = null, briefHist = null, briefIdx = 0;
+  function briefList() {
+    const list = (briefHist || []).slice();
+    if (briefLatest && briefLatest.generatedAt && !list.some((x) => x.generatedAt === briefLatest.generatedAt)) {
+      list.push({ generatedAt: briefLatest.generatedAt, text: briefLatest.text });
+    }
+    return list; // chronological, oldest first
+  }
+  function paintBrief(entry, idx) {
+    const body = $('brief-body'); if (!body || !entry) return;
+    const list = briefList();
+    const n = list.length;
+    const canBack = briefHist === null ? true : idx < n - 1; // before history loads, let ‹ try
+    const when = entry.generatedAt ? timeAgo(entry.generatedAt) : 'just now';
+    body.innerHTML = `<div class="brief-text">${esc(String(entry.text || '').trim())}</div>` +
+      `<div class="brief-meta"><button class="hero-nav brief-nav" id="briefPrev" title="Older brief" ${canBack ? '' : 'disabled'}>‹</button>` +
+      `<span>${idx > 0 ? 'Brief from ' + esc(when) : 'Generated ' + esc(when)}${n > 1 ? ' · ' + (n - idx) + '/' + n : ''}</span>` +
+      `<button class="hero-nav brief-nav" id="briefNext" title="Newer brief" ${idx > 0 ? '' : 'disabled'}>›</button></div>`;
+  }
+  async function pageBrief(dir) {
+    if (briefHist === null) {
+      try { const r = await AIOS.api.get('/api/brief/history'); briefHist = Array.isArray(r.briefs) ? r.briefs : []; }
+      catch { briefHist = []; }
+    }
+    const list = briefList();
+    if (!list.length) return;
+    briefIdx = Math.max(0, Math.min(list.length - 1, briefIdx + dir));
+    paintBrief(list[list.length - 1 - briefIdx], briefIdx);
   }
   async function loadBrief() {
     let b = null;
@@ -908,6 +1041,14 @@
       // hero month navigation
       if (e.target.closest('#revPrev')) { heroMonthOffset -= 1; renderDashKpis(businessData); return; }
       if (e.target.closest('#revNext')) { heroMonthOffset += 1; renderDashKpis(businessData); return; }
+      // trend / heatmap window paging
+      if (e.target.closest('#trendPrev')) { revOffset += 1; renderRevChart(); return; }
+      if (e.target.closest('#trendNext')) { revOffset -= 1; renderRevChart(); return; }
+      if (e.target.closest('#heatPrev')) { heatOffset += 1; renderHeatmap(); return; }
+      if (e.target.closest('#heatNext')) { heatOffset -= 1; renderHeatmap(); return; }
+      // brief history pager
+      if (e.target.closest('#briefPrev')) { pageBrief(1); return; }
+      if (e.target.closest('#briefNext')) { pageBrief(-1); return; }
       // revenue chart mode
       const rs = e.target.closest('#revSeg .seg-btn');
       if (rs) {

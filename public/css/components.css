@@ -303,6 +303,31 @@
 .hero-nav:hover:not(:disabled) { border-color: rgba(100, 210, 255, 0.5); background: rgba(10, 132, 255, 0.14); }
 .hero-nav:disabled { opacity: 0.28; cursor: default; }
 .hero-card .card-head h2 { margin-right: 2px; }
+
+/* net-worth sparkline (daily history + live point) */
+.kpi-spark { display: block; width: 100%; height: 22px; margin-top: 5px; }
+
+/* brief history pager */
+.brief-meta { display: flex; align-items: center; gap: 8px; }
+.brief-meta .brief-nav { width: 18px; height: 18px; font-size: 12px; }
+
+/* data freshness strip — when each source last actually succeeded */
+.fresh-strip {
+  display: flex; flex-wrap: wrap; gap: 6px 14px;
+  padding: 8px 14px;
+  margin-top: 2px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  color: var(--faint);
+}
+.fresh-chip { display: inline-flex; align-items: center; gap: 5px; }
+.fresh-chip em { font-style: normal; color: var(--dim); opacity: 0.75; }
+.fresh-dot { width: 6px; height: 6px; border-radius: 50%; flex: none; }
+.fresh-dot.ok { background: var(--green); box-shadow: 0 0 5px rgba(48, 209, 88, 0.6); }
+.fresh-dot.warn { background: var(--amber, #ffd60a); }
+.fresh-dot.bad { background: var(--red); }
+.fresh-dot.off { background: rgba(140, 160, 190, 0.35); }
 .hero-body { flex: 1; padding: 4px 18px 18px; min-height: 0; }
 .hero-figure {
   font-family: var(--font-display);

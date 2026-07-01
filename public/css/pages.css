@@ -561,6 +561,7 @@
 .mkt-px { margin-left: 2px; }
 .live-dot { background: var(--faint); animation: none; margin-left: auto; }
 .live-dot.on { background: var(--green); box-shadow: 0 0 8px var(--green); animation: pulse-dot 2.2s ease-out infinite; }
+.live-dot.stale { background: var(--amber, #ffd60a); box-shadow: 0 0 8px rgba(255, 214, 10, 0.5); animation: none; }
 .donut-wrap { height: 100%; min-height: 220px; }
 .pf-edit-head, .pf-erow { display: grid; grid-template-columns: 70px 1fr 70px 70px 70px; gap: 8px; align-items: center; }
 .pf-edit-head { font-family: var(--font-mono); font-size: 9px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--faint); padding-bottom: 6px; }

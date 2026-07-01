@@ -314,6 +314,7 @@ async function getYouTube() {
       recentVideos,
     };
     ytCache = { at: Date.now(), data: result };
+    markFresh('youtube');
     return result;
   } catch (e) {
     return { available: false, reason: e.reason || 'error', message: e.message };
@@ -1024,7 +1025,7 @@ async function getTrends() {
       if (competitors.length >= 6) break;
     }
     const data = { available: trending.length > 0 || competitors.length > 0, timestamp: new Date().toISOString(), trending, competitors };
-    if (data.available) trendsCache = { at: Date.now(), data };
+    if (data.available) { trendsCache = { at: Date.now(), data }; markFresh('trends'); }
     return data;
   } catch (e) {
     return trendsCache.data || { available: false, reason: e.reason || 'error', message: e.message, trending: [], competitors: [] };
@@ -1622,13 +1623,64 @@ async function generateBrief() {
     if (timedOut) {
       finish({ status: 'error', startedAt, error: 'timed out after 3 minutes' });
     } else if (code === 0 && text) {
-      finish({ status: 'ready', generatedAt: new Date().toISOString(), text });
+      const ready = { status: 'ready', generatedAt: new Date().toISOString(), text };
+      finish(ready);
+      appendBriefHistory(ready).catch(() => {});
     } else {
       const why = errOut.trim().slice(0, 500) || ('claude exited with code ' + code + (text ? '' : ' and no output'));
       finish({ status: 'error', startedAt, error: why });
     }
   });
 }
+
+// Brief history — keep the last 14 briefs so yesterday's plan is one click away.
+const BRIEF_HISTORY_FILE = path.join(AIOS_DATA_DIR, 'brief-history.json');
+async function readBriefHistory() {
+  try { const j = JSON.parse(await fsp.readFile(BRIEF_HISTORY_FILE, 'utf8')); return Array.isArray(j) ? j : []; }
+  catch { return []; }
+}
+async function appendBriefHistory(b) {
+  const hist = await readBriefHistory();
+  hist.push({ generatedAt: b.generatedAt, text: b.text });
+  await writeJsonAtomic(BRIEF_HISTORY_FILE, hist.slice(-14));
+}
+
+// ---------------------------------------------------------------------------
+// Net-worth history — one snapshot per day (last write wins), so the Net Worth
+// tile can show where the number has been, not just where it is. Snapshots on
+// boot (after quote warmup) + every 6 h; ~2 years retained.
+// ---------------------------------------------------------------------------
+const NETWORTH_HISTORY_FILE = path.join(AIOS_DATA_DIR, 'networth-history.json');
+async function snapshotNetWorth() {
+  try {
+    const nw = await getNetWorth([]);
+    if (!nw || !nw.available || !(nw.total > 0)) return;
+    const today = new Date().toISOString().slice(0, 10);
+    let hist = [];
+    try { hist = JSON.parse(await fsp.readFile(NETWORTH_HISTORY_FILE, 'utf8')); } catch { /* first run */ }
+    if (!Array.isArray(hist)) hist = [];
+    const entry = {
+      date: today,
+      total: Math.round(nw.total),
+      motorcycle: Math.round(nw.motorcycle), cash: Math.round(nw.cash),
+      savings: Math.round(nw.savings), stocks: Math.round(nw.stocks),
+    };
+    const i = hist.findIndex((h) => h && h.date === today);
+    if (i >= 0) hist[i] = entry; else hist.push(entry);
+    hist.sort((a, b) => String(a.date).localeCompare(String(b.date)));
+    await writeJsonAtomic(NETWORTH_HISTORY_FILE, hist.slice(-730));
+  } catch { /* next pass */ }
+}
+setTimeout(() => snapshotNetWorth(), 25 * 1000);
+setInterval(() => snapshotNetWorth(), 6 * 60 * 60 * 1000);
+
+// ---------------------------------------------------------------------------
+// Freshness — when did each upstream source last actually succeed? (Cache
+// reads don't count.) Feeds the Command Center freshness strip so a silently
+// dead source is visible instead of hiding behind per-tile empty states.
+// ---------------------------------------------------------------------------
+const freshness = {};
+function markFresh(key) { freshness[key] = new Date().toISOString(); }
 
 // ---------------------------------------------------------------------------
 // New-post detection — stamp each content item the first time we see it. Items
@@ -1791,6 +1843,7 @@ async function getCrm(force) {
   const [clients, bookings] = await Promise.all([crmCollection('clients'), crmCollection('bookings')]);
   const data = { available: true, fetchedAt: new Date().toISOString(), clients, bookings };
   crmCache = { at: Date.now(), data };
+  markFresh('crm');
   return data;
 }
 
@@ -1968,6 +2021,34 @@ app.post('/api/portfolio', express.json({ limit: '64kb' }), async (req, res) => 
 // Live stock quotes — Yahoo v8 chart (per-symbol), server-cached ~4s. No API key.
 const quoteCache = {};
 const QUOTE_TTL = 4000;
+
+// Last-good quote persistence — Yahoo's endpoints are unofficial and have
+// broken before (the earnings cookie+crumb saga). Snapshot the quote cache to
+// disk every 2 min and reload it at boot, so a Yahoo outage degrades the
+// dashboard to "stale prices as of X" instead of dashes everywhere. Each quote
+// carries `asOf` so the frontend can tell live from stale.
+const QUOTES_CACHE_FILE = path.join(AIOS_DATA_DIR, 'quotes-cache.json');
+let quotesDirty = false;
+(async () => {
+  try {
+    const saved = JSON.parse(await fsp.readFile(QUOTES_CACHE_FILE, 'utf8'));
+    let n = 0;
+    for (const [sym, entry] of Object.entries(saved || {})) {
+      if (entry && entry.data && entry.data.price != null && !quoteCache[sym]) {
+        // keep the original (old) `at` so TTL logic still refetches — these
+        // entries only serve as fallbacks when live fetches fail
+        quoteCache[sym] = entry;
+        n++;
+      }
+    }
+    if (n) console.log(`[AIOS] quotes: loaded ${n} last-good prices from disk`);
+  } catch { /* first run */ }
+})();
+setInterval(() => {
+  if (!quotesDirty) return;
+  quotesDirty = false;
+  writeJsonAtomic(QUOTES_CACHE_FILE, quoteCache).catch(() => {});
+}, 2 * 60 * 1000);
 async function fetchYahooQuote(symbol) {
   const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=5m&range=1d&includePrePost=true`;
   const r = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }, signal: AbortSignal.timeout(8000) });
@@ -1990,7 +2071,9 @@ async function fetchYahooQuote(symbol) {
     else state = 'CLOSED';
     if (!m.hasPrePostMarketData && (state === 'PRE' || state === 'POST')) state = 'CLOSED';
   }
-  const out = { price, prevClose: prev, change: price - prev, changePct: prev ? ((price - prev) / prev) * 100 : 0, currency: m.currency || 'USD', state };
+  const out = { price, prevClose: prev, change: price - prev, changePct: prev ? ((price - prev) / prev) * 100 : 0, currency: m.currency || 'USD', state, asOf: new Date().toISOString() };
+  markFresh('quotes');
+  quotesDirty = true;
   // Extended hours: latest pre/post trade from the included intraday closes,
   // quoted vs the most recent regular close (= `price` during PRE and POST).
   if (/^(PRE|POST)/.test(state)) {
@@ -2013,6 +2096,26 @@ app.get('/api/quotes', async (req, res) => {
   const quotes = {};
   for (const s of syms) if (quoteCache[s]) quotes[s] = quoteCache[s].data;
   res.json({ quotes, at: new Date().toISOString() });
+});
+
+app.get('/api/networth/history', async (req, res) => {
+  try {
+    const j = JSON.parse(await fsp.readFile(NETWORTH_HISTORY_FILE, 'utf8'));
+    res.json({ history: Array.isArray(j) ? j : [] });
+  } catch { res.json({ history: [] }); }
+});
+
+app.get('/api/brief/history', async (req, res) => {
+  res.json({ briefs: await readBriefHistory() });
+});
+
+app.get('/api/freshness', async (req, res) => {
+  // live-marked sources + file-backed timestamps for the poll-driven ones
+  const out = { ...freshness };
+  try { const c = await readSocialCache(); if (c && c.fetchedAt) out.social = c.fetchedAt; } catch { /* absent */ }
+  try { const n = await readNextdoorStore(); if (n && n.lastPolledAt) out.nextdoor = n.lastPolledAt; } catch { /* absent */ }
+  try { const b = await readBrief(); if (b && b.generatedAt) out.brief = b.generatedAt; } catch { /* absent */ }
+  res.json({ at: new Date().toISOString(), sources: out });
 });
 
 app.get('/api/vault', (req, res) => {
