@@ -1,0 +1,8 @@
+node_modules/
+.env
+server.out.log
+server.err.log
+*.log
+scripts/shots/
+rebuild/
+preview/

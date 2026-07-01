@@ -1,0 +1,239 @@
+/* ==========================================================================
+   AIOS v2 — MISSION CONTROL · theme.css
+   Tokens, reset, fonts, background, keyframes, utilities.
+   Component chrome lives in components.css; page grids in pages.css.
+   ========================================================================== */
+
+:root {
+  --bg: #04060c;
+  --bg2: #070b14;
+  --panel: rgba(9, 16, 30, 0.55);
+  --panel-solid: #0a1220;
+  --line: rgba(80, 170, 255, 0.14);
+  --line-bright: rgba(125, 205, 255, 0.5);
+  --blue: #0a84ff;
+  --cyan: #64d2ff;
+  --laser: #3df2ff;
+  --text: #e9f3ff;
+  --dim: #8da6c5;
+  --faint: #4d617e;
+  --green: #30d158;
+  --red: #ff453a;
+  --amber: #ffd60a;
+  --glow: 0 0 22px rgba(10, 132, 255, 0.35);
+  --radius: 14px;
+  --font-display: 'Space Grotesk', sans-serif;
+  --font-mono: 'JetBrains Mono', Consolas, monospace;
+  --font-body: 'Inter', sans-serif;
+  --topbar-h: 64px;
+  --sidebar-w: 64px;
+}
+
+/* ---- reset ---- */
+*, *::before, *::after { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; height: 100%; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 14px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden; /* pages scroll internally */
+}
+h1, h2, h3, h4 { margin: 0; font-family: var(--font-display); font-weight: 600; }
+p { margin: 0 0 0.6em; }
+a { color: var(--cyan); text-decoration: none; }
+a:hover { text-decoration: underline; text-decoration-color: rgba(100, 210, 255, 0.5); }
+button { font-family: inherit; color: inherit; background: none; border: none; cursor: pointer; padding: 0; }
+input, select, textarea { font-family: var(--font-mono); font-size: 13px; color: var(--text); }
+img { max-width: 100%; }
+canvas { display: block; }
+[hidden] { display: none !important; }
+
+::selection { background: rgba(10, 132, 255, 0.4); color: #fff; }
+:focus-visible { outline: 1.5px solid var(--cyan); outline-offset: 2px; border-radius: 4px; }
+
+/* ---- background: starfield canvas + aurora glow layers ---- */
+#bgfx {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+}
+body::before {
+  content: '';
+  position: fixed;
+  inset: -20%;
+  z-index: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(42% 38% at 18% 8%, rgba(10, 132, 255, 0.12), transparent 60%),
+    radial-gradient(36% 32% at 85% 18%, rgba(61, 242, 255, 0.07), transparent 60%),
+    radial-gradient(50% 44% at 60% 100%, rgba(10, 70, 180, 0.10), transparent 65%);
+  animation: aurora-drift 36s ease-in-out infinite alternate;
+}
+
+/* ---- scrollbars ---- */
+::-webkit-scrollbar { width: 9px; height: 9px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: rgba(80, 170, 255, 0.16);
+  border-radius: 8px;
+  border: 2px solid var(--bg);
+}
+::-webkit-scrollbar-thumb:hover { background: rgba(100, 210, 255, 0.45); }
+* { scrollbar-width: thin; scrollbar-color: rgba(80, 170, 255, 0.25) transparent; }
+
+/* ==========================================================================
+   KEYFRAMES LIBRARY
+   ========================================================================== */
+
+@keyframes aurora-drift {
+  from { transform: translate3d(-2%, -1%, 0) scale(1); }
+  to   { transform: translate3d(2%, 2%, 0) scale(1.06); }
+}
+
+/* one-shot scanline sweep across a card (used on .card:hover via components.css) */
+@keyframes scan-sweep {
+  from { transform: translateX(-110%); opacity: 0.9; }
+  to   { transform: translateX(380%); opacity: 0; }
+}
+
+/* page/card power-on reveal */
+@keyframes power-on {
+  0%   { opacity: 0; transform: translateY(14px) scale(0.985); clip-path: inset(0 0 62% 0); }
+  55%  { opacity: 1; clip-path: inset(0 0 0 0); }
+  100% { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@keyframes pulse-dot {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(48, 209, 88, 0.55); }
+  60%      { box-shadow: 0 0 0 6px rgba(48, 209, 88, 0); }
+}
+
+@keyframes pulse-badge {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(100, 210, 255, 0.45); }
+  60%      { box-shadow: 0 0 0 5px rgba(100, 210, 255, 0); }
+}
+
+@keyframes blink-caret {
+  0%, 49% { opacity: 1; }
+  50%, 100% { opacity: 0; }
+}
+
+@keyframes spin-slow {
+  to { transform: rotate(360deg); }
+}
+@keyframes spin-slower {
+  to { transform: rotate(-360deg); }
+}
+
+@keyframes rise-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes glow-pulse {
+  0%, 100% { filter: drop-shadow(0 0 6px rgba(100, 210, 255, 0.45)); }
+  50%      { filter: drop-shadow(0 0 16px rgba(61, 242, 255, 0.8)); }
+}
+
+@keyframes dots-think {
+  0%, 20% { content: '·'; }
+  40% { content: '··'; }
+  60%, 100% { content: '···'; }
+}
+
+/* ==========================================================================
+   UTILITIES
+   ========================================================================== */
+
+.mono { font-family: var(--font-mono); }
+
+/* money: privacy blur + signed coloring (contract-mandated) */
+.money { transition: filter 0.25s ease; }
+body.privacy .money { filter: blur(9px); }
+.money.pos { color: var(--green); }
+.money.neg { color: var(--red); }
+
+/* status dots */
+.dot {
+  display: inline-block;
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  background: var(--faint);
+  vertical-align: middle;
+  flex: none;
+}
+.dot.live { background: var(--green); animation: pulse-dot 2.2s ease-out infinite; }
+.dot.warn { background: var(--amber); }
+.dot.err  { background: var(--red); }
+.dot.info { background: var(--cyan); }
+
+/* chips */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--dim);
+  background: rgba(80, 170, 255, 0.08);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 2.5px 9px;
+  white-space: nowrap;
+}
+.chip.accent { color: var(--cyan); border-color: rgba(100, 210, 255, 0.35); }
+.chip.good { color: var(--green); border-color: rgba(48, 209, 88, 0.35); background: rgba(48, 209, 88, 0.07); }
+.chip.warn { color: var(--amber); border-color: rgba(255, 214, 10, 0.35); background: rgba(255, 214, 10, 0.06); }
+
+/* NEW badge */
+.badge-new {
+  display: inline-block;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: #03121f;
+  background: linear-gradient(135deg, var(--cyan), var(--laser));
+  border-radius: 5px;
+  padding: 2px 6px;
+  animation: pulse-badge 2.4s ease-out infinite;
+}
+
+/* generic label style for mono uppercase microcopy */
+.microlabel {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+
+/* hairline divider */
+.hairline { border: 0; border-top: 1px solid var(--line); margin: 10px 0; }
+
+/* truncation helpers */
+.ell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.clamp2 {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* ==========================================================================
+   REDUCED MOTION — kill all theater, keep function
+   ========================================================================== */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001s !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001s !important;
+  }
+  body::before { animation: none; }
+}

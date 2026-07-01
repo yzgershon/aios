@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AIOS — Mission Control</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%2304060c'/><circle cx='16' cy='16' r='9' fill='none' stroke='%2364d2ff' stroke-width='2' opacity='0.7'/><circle cx='16' cy='16' r='3.5' fill='%230a84ff'/><path d='M16 3v5M16 24v5M3 16h5M24 16h5' stroke='%230a84ff' stroke-width='2' stroke-linecap='round' opacity='0.8'/></svg>" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css" />
+  <link rel="stylesheet" href="css/theme.css" />
+  <link rel="stylesheet" href="css/components.css" />
+  <link rel="stylesheet" href="css/pages.css" />
+  <style>
+    /* boot overlay must cover instantly, before stylesheets parse */
+    #boot{position:fixed;inset:0;z-index:100;background:#04060c;display:flex;align-items:center;justify-content:center}
+  </style>
+</head>
+<body>
+  <canvas id="bgfx" aria-hidden="true"></canvas>
+
+  <!-- BOOT -->
+  <div id="boot" aria-hidden="true">
+    <div class="boot-inner">
+      <svg class="boot-logo" viewBox="0 0 64 64" width="72" height="72">
+        <circle cx="32" cy="32" r="22" fill="none" stroke="#64d2ff" stroke-width="2" class="boot-ring" />
+        <circle cx="32" cy="32" r="29" fill="none" stroke="#0a84ff" stroke-width="1" opacity="0.35" class="boot-ring2" />
+        <circle cx="32" cy="32" r="7" fill="#0a84ff" class="boot-core" />
+        <path d="M32 2v9M32 53v9M2 32h9M53 32h9" stroke="#0a84ff" stroke-width="2" stroke-linecap="round" opacity="0.8" />
+      </svg>
+      <div class="boot-title">AIOS <span class="boot-ver">MISSION CONTROL</span></div>
+      <div class="boot-lines" id="bootLines"></div>
+      <div class="boot-bar"><div class="boot-fill" id="bootFill"></div></div>
+      <div class="boot-skip">click or press any key to skip</div>
+    </div>
+  </div>
+  <script>
+    // failsafe: never let a broken script trap the user behind the boot screen
+    setTimeout(function(){ var b = document.getElementById('boot'); if (b && !window.AIOS) b.remove(); }, 9000);
+  </script>
+
+  <!-- SIDEBAR -->
+  <aside class="sidebar">
+    <div class="side-logo" title="AIOS">
+      <svg viewBox="0 0 32 32" width="26" height="26"><rect width="32" height="32" rx="9" fill="#0b1426"/><circle cx="16" cy="16" r="8" fill="none" stroke="#64d2ff" stroke-width="1.6" opacity="0.7"/><circle cx="16" cy="16" r="3.2" fill="#0a84ff"/><path d="M16 4.5v4M16 23.5v4M4.5 16h4M23.5 16h4" stroke="#0a84ff" stroke-width="1.8" stroke-linecap="round" opacity="0.85"/></svg>
+    </div>
+    <nav class="side-nav" id="sideNav"><!-- built by core.js from registered pages --></nav>
+    <div class="side-bottom">
+      <button class="side-item ghost" id="sideTerminal" title="Terminal">
+        <svg viewBox="0 0 24 24" width="20" height="20"><rect x="3" y="4" width="18" height="16" rx="2.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M7 9l3 3-3 3M13 15h4" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+      <div class="side-avatar" title="Yish">Y</div>
+    </div>
+  </aside>
+
+  <!-- APP -->
+  <div class="app">
+    <header class="topbar">
+      <div class="topbar-title">
+        <h1 id="pageTitle">Command Center</h1>
+        <span class="topbar-sub" id="pageSub"></span>
+      </div>
+      <div class="topbar-right">
+        <div class="topbar-hello" id="topHello">
+          <span class="hello-greet" id="helloGreet">Welcome back, Yish</span>
+          <span class="hello-date"><span class="hd-dot"></span><span id="helloDate">&mdash;</span><span class="hd-time" id="helloTime"></span></span>
+        </div>
+        <div class="clock"><span class="clock-label">Updated</span><span id="updatedAt">&mdash;</span></div>
+        <button class="icon-btn" id="paletteBtn" title="Command palette (Ctrl+K)">
+          <svg viewBox="0 0 24 24" width="18" height="18"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2.2"/><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>
+        </button>
+        <button class="icon-btn" id="notifBtn" title="Notifications">
+          <svg viewBox="0 0 24 24" width="18" height="18"><path d="M6 9.5a6 6 0 0112 0c0 4 1.5 5.5 2 6.5H4c.5-1 2-2.5 2-6.5z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M10 19a2.2 2.2 0 004 0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+          <span class="notif-badge" id="notifBadge" hidden>0</span>
+        </button>
+        <a class="icon-btn" id="gaBtn" href="https://analytics.google.com/" target="_blank" rel="noopener" title="Google Analytics">
+          <svg viewBox="0 0 24 24" width="18" height="18"><path d="M5 21V10M12 21V4M19 21v-7" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </a>
+        <button class="icon-btn" id="soundBtn" title="Sound on / off">
+          <svg class="snd-on" viewBox="0 0 24 24" width="18" height="18"><path d="M4 9v6h3l5 4V5L7 9H4z" fill="currentColor"/><path d="M15.5 8.5a5 5 0 010 7M18 6a8.5 8.5 0 010 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+          <svg class="snd-off" viewBox="0 0 24 24" width="18" height="18" hidden><path d="M4 9v6h3l5 4V5L7 9H4z" fill="currentColor"/><path d="M16 9.5l5 5M21 9.5l-5 5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        </button>
+        <button class="icon-btn" id="privacyBtn" title="Hide / show amounts">
+          <svg class="eye-open" viewBox="0 0 24 24" width="18" height="18"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="2"/></svg>
+          <svg class="eye-off" viewBox="0 0 24 24" width="18" height="18" hidden><path d="M2 12s3.5-7 10-7c2 0 3.8.6 5.3 1.5M22 12s-3.5 7-10 7c-2 0-3.8-.6-5.3-1.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M4 4l16 16" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        </button>
+        <button class="icon-btn" id="refreshBtn" title="Refresh">
+          <svg viewBox="0 0 24 24" width="18" height="18"><path d="M20 11a8 8 0 10-2.3 5.6M20 5v6h-6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- PAGE SHELLS — each page module mounts into its own shell -->
+    <main class="page" id="page-dashboard"></main>
+    <main class="page" id="page-pipeline"></main>
+    <main class="page" id="page-portfolio"></main>
+    <main class="page" id="page-ads"></main>
+    <main class="page" id="page-goals"></main>
+    <main class="page page-graph" id="page-brain"></main>
+
+    <!-- TERMINAL (global — available on every page) -->
+    <section class="terminal-region collapsed" id="terminalRegion">
+      <div class="terminal-bar" id="terminalBar">
+        <button class="term-toggle" id="termToggle" title="Expand / collapse terminal"><span class="caret">&#9656;</span><span class="prompt">_</span></button>
+        <span class="term-title">Terminal</span>
+        <div class="skill-buttons" id="skillButtons"></div>
+        <span class="term-status" id="termStatus">idle</span>
+      </div>
+      <div class="terminal-stage" id="terminalStage"><div id="xterm"></div></div>
+    </section>
+  </div>
+
+  <!-- NOTIFICATION PANEL + COMMAND PALETTE (os.js builds internals) -->
+  <div id="notifPanel" hidden></div>
+  <div id="palette" hidden></div>
+
+  <!-- Robbie the dog mascot is injected into the Revenue·This Month card by js/panda.js -->
+
+  <!-- LIGHTBOX / MODALS / TOASTS -->
+  <div class="lightbox" id="lightbox" hidden>
+    <div class="lightbox-backdrop" data-close="1"></div>
+    <div class="lightbox-card" id="lightboxCard"></div>
+  </div>
+  <div id="modalRoot"></div>
+  <div id="toasts"></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-firestore-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-auth-compat.js"></script>
+  <script src="js/core.js"></script>
+  <script src="js/charts.js"></script>
+  <script src="js/terminal.js"></script>
+  <script src="js/pages/dashboard.js"></script>
+  <script src="js/pages/portfolio.js"></script>
+  <script src="js/pages/brain.js"></script>
+  <script src="js/pages/ads.js"></script>
+  <script src="js/pages/pipeline.js"></script>
+  <script src="js/pages/goals.js"></script>
+  <script src="js/os.js"></script>
+  <script src="js/panda.js"></script>
+</body>
+</html>
