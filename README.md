@@ -13,6 +13,7 @@ terminal. Express + ws + node-pty, plain HTML/CSS/JS, no build step.
 
 **Last updated: 2026-07-01**
 
+- Canonical local path is now `C:\Dev\AIOS` (moved from Desktop on 2026-07-02).
 - v2 "Mission Control" (June 12 rebuild) + the July 1 hardening pass:
   git + private GitHub (`yzgershon/aios`), Host-header allowlist,
   CRM reads server-side (`/api/crm`), to-do seeds in `~/.aios/todos.json`,
@@ -28,7 +29,7 @@ terminal. Express + ws + node-pty, plain HTML/CSS/JS, no build step.
 Normally the **`AIOS Server` scheduled task** starts it at logon. Manually:
 
 ```powershell
-cd $env:USERPROFILE\Desktop\AIOS
+cd C:\Dev\AIOS
 node server.js
 ```
 
