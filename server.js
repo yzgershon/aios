@@ -39,12 +39,42 @@ const { getLocalDemand, pollNextdoorLeads, readNextdoorStore, isNextdoorPolling,
 const { getCrm } = require('./lib/crm');
 const { getProjects, getMetrics, defaultMetrics, normalizeMetrics, getPortfolio, computePortfolio, getNetWorth, snapshotNetWorth, NETWORTH_HISTORY_FILE, getPipeline, defaultPipeline, normalizePipelineCard, PIPELINE_COLUMNS, PIPELINE_COLUMN_SET, PIPELINE_MAX_CARDS, getGoals, normalizeGoals, parseVault, getTodos } = require('./lib/store');
 const { readBrief, generateBrief, readBriefHistory, isBriefGenerating } = require('./lib/brief');
+const { synthesizeAudio, listVoices, listElevenLabsVoices, TTS_VOICE, TTS_PROVIDER, ELEVENLABS_ENABLED, ELEVENLABS_VOICE_ID, ELEVENLABS_MODEL_ID, ACK_LINES, ackPath, FILLER_LINES, fillerPath } = require('./lib/jarvis');
+const { codexChat, codexChatStream, getCodexStatus, initializeCodex, resetCodexThread } = require('./lib/codex-brain');
+const { tryDirectLocalTool } = require('./lib/jarvis-tools');
 const { CLAUDE, buildSpawn, ptyEnv } = require('./lib/claude');
 
 // ---------------------------------------------------------------------------
 // Express app — serves ONLY ./public (no dotfiles, no project root)
 // ---------------------------------------------------------------------------
 const app = express();
+
+// Small in-memory trace for Jarvis. It intentionally stores only event names,
+// timings, and status fields - never prompts, transcripts, or secrets.
+const jarvisRuntime = {
+  startedAt: new Date().toISOString(),
+  events: [],
+  requests: [],
+  voiceStatus: null,
+};
+function recordJarvisEvent(event, fields = {}) {
+  const row = { at: new Date().toISOString(), event: String(event || '').slice(0, 80), ...fields };
+  jarvisRuntime.events.push(row);
+  if (jarvisRuntime.events.length > 200) jarvisRuntime.events.splice(0, jarvisRuntime.events.length - 200);
+  return row;
+}
+app.use((req, res, next) => {
+  if (!req.path.startsWith('/api/jarvis')) return next();
+  const started = performance.now();
+  res.once('finish', () => {
+    jarvisRuntime.requests.push({
+      at: new Date().toISOString(), method: req.method, path: req.path,
+      status: res.statusCode, ms: Math.round(performance.now() - started),
+    });
+    if (jarvisRuntime.requests.length > 100) jarvisRuntime.requests.shift();
+  });
+  next();
+});
 
 // ---------------------------------------------------------------------------
 // Host allowlist — first middleware, covers every route and static file.
@@ -239,7 +269,13 @@ app.get('/api/vault/note', (req, res) => {
 });
 
 app.get('/api/health', (req, res) => {
-  res.json({ ok: true, pty: !!pty, ptyError: pty ? null : String((ptyError && ptyError.message) || ptyError) });
+  res.json({
+    ok: true,
+    pty: !!pty,
+    ptyError: pty ? null : String((ptyError && ptyError.message) || ptyError),
+    uptimeSec: Math.round(process.uptime()),
+    jarvis: { brain: 'codex', brainStatus: getCodexStatus(), voice: jarvisRuntime.voiceStatus },
+  });
 });
 
 app.get('/api/pipeline', async (req, res) => {
@@ -299,6 +335,478 @@ app.post('/api/brief/generate', (req, res) => {
   if (isBriefGenerating()) return res.json({ status: 'generating' });
   generateBrief().catch(() => {}); // fire-and-forget; client polls GET /api/brief
   res.json({ status: 'started' });
+});
+
+// Jarvis — one conversational turn through the headless claude brain (Phase 0).
+// Blocking request/response; streaming comes in a later phase.
+app.post('/api/jarvis/chat', express.json({ limit: '32kb' }), async (req, res) => {
+  const body = req.body || {};
+  const message = typeof body.message === 'string' ? body.message : '';
+  const history = Array.isArray(body.history) ? body.history : [];
+  if (!message.trim()) return res.status(400).json({ error: 'empty message' });
+  try {
+    const direct = await tryDirectLocalTool(message);
+    const result = direct && direct.reply
+      ? { reply: direct.reply, provider: 'local-direct', model: null, latencyMs: 0, ttftMs: 0 }
+      : await codexChat(message, history);
+    res.json({ ...result, at: new Date().toISOString() });
+  } catch (e) {
+    res.status(502).json({ error: String((e && e.message) || e) });
+  }
+});
+
+// Jarvis voice — offline local TTS (System.Speech). Returns a WAV the browser
+// plays. The frontend falls back to browser speechSynthesis if this 502s.
+app.get('/api/jarvis/voices', async (req, res) => {
+  try {
+    let elevenlabs = [];
+    if (ELEVENLABS_ENABLED || process.env.ELEVENLABS_API_KEY || process.env.ELEVEN_API_KEY) {
+      try { elevenlabs = await listElevenLabsVoices(); } catch { elevenlabs = []; }
+    }
+    res.json({
+      provider: TTS_PROVIDER,
+      voices: await listVoices(),
+      default: TTS_VOICE,
+      elevenlabs: {
+        configured: ELEVENLABS_ENABLED,
+        voiceId: ELEVENLABS_VOICE_ID || null,
+        modelId: ELEVENLABS_MODEL_ID,
+        voices: elevenlabs,
+      },
+    });
+  }
+  catch (e) { res.status(500).json({ error: String((e && e.message) || e), voices: [] }); }
+});
+
+// Jarvis streaming turn. Text deltas flow from Codex so the frontend can speak
+// sentence-by-sentence while the turn completes.
+// Events: {type:'delta', text} ... {type:'done', reply} | {type:'error', error}.
+app.post('/api/jarvis/chat-stream', express.json({ limit: '32kb' }), async (req, res) => {
+  const body = req.body || {};
+  const message = typeof body.message === 'string' ? body.message : '';
+  const history = Array.isArray(body.history) ? body.history : [];
+  if (!message.trim()) return res.status(400).json({ error: 'empty message' });
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+  const aborter = new AbortController();
+  let responseClosed = false;
+  res.on('close', () => {
+    responseClosed = true;
+    if (!res.writableEnded) aborter.abort(new Error('Jarvis client disconnected'));
+  });
+  const sse = (obj) => {
+    if (responseClosed || res.writableEnded) return;
+    try { res.write('data: ' + JSON.stringify(obj) + '\n\n'); } catch { /* client gone */ }
+  };
+
+  try {
+    const onDelta = (text) => sse({ type: 'delta', text });
+    const started = performance.now();
+    const direct = await tryDirectLocalTool(message);
+    const result = direct && direct.reply
+      ? { reply: direct.reply, provider: 'local-direct', model: null, latencyMs: Math.round(performance.now() - started), ttftMs: 0 }
+      : await codexChatStream(message, history, onDelta, { signal: aborter.signal });
+    if (direct && direct.reply) onDelta(direct.reply);
+    recordJarvisEvent('brain.done', {
+      provider: result.provider, ms: result.latencyMs, ttftMs: result.ttftMs,
+    });
+    sse({ type: 'done', ...result });
+  } catch (e) {
+    const error = String((e && e.message) || e);
+    recordJarvisEvent('brain.error', { error: error.slice(0, 160) });
+    sse({ type: 'error', error });
+  }
+  if (!responseClosed && !res.writableEnded) res.end();
+});
+
+app.get('/api/jarvis/brain-status', (req, res) => res.json(getCodexStatus()));
+app.post('/api/jarvis/brain-reset', async (req, res) => {
+  try { res.json({ ok: true, brain: await resetCodexThread() }); }
+  catch (e) {
+    const error = String((e && e.message) || e);
+    res.status(/busy/i.test(error) ? 409 : 500).json({ ok: false, error });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Jarvis approvals — the confirm-risky gate (Phase 3). The approval MCP bridge
+// POSTs here when the brain wants to run a gated tool; we broadcast the ask to
+// the Jarvis UI over SSE and block until Yish clicks Approve/Deny (90s → deny).
+// ---------------------------------------------------------------------------
+const pendingApprovals = new Map(); // id -> { resolve, info }
+const approvalClients = new Set();  // SSE responses
+const APPROVAL_TIMEOUT = 90 * 1000;
+let approvalSeq = 0;
+
+function approvalBroadcast(obj) {
+  const line = 'data: ' + JSON.stringify(obj) + '\n\n';
+  for (const client of approvalClients) { try { client.write(line); } catch { /* gone */ } }
+}
+
+// Risk classifier — default is ALLOW so Jarvis stops nagging (Yish's call). Only
+// genuinely irreversible / external / money actions still pop the gate, which is
+// the SOUL.md hard line: never send, post, spend, or delete without an explicit
+// yes. Everything else (reads, CRM lookups, file writes, opening apps, safe
+// commands, running skills) auto-approves silently.
+function isRisky(tool, input) {
+  const t = String(tool || '');
+  // external send / publish / spend via any connected service (MCP tools)
+  if (/(send|post|publish|tweet|email|reply.*send|pay|purchase|checkout|charge|delete|remove|trash)/i.test(t)) return true;
+  if (input && (input.allowSensitive === true || input.allowSensitive === 'true')) return true;
+  const intent = [input && input.intent, input && input.name, input && input.target, input && input.keys]
+    .filter(Boolean).join(' ');
+  if (/\b(send|submit|post|publish|tweet|pay|purchase|checkout|charge|delete|remove|trash|close|quit|exit|sign\s*out|log\s*out)\b/i.test(intent)) return true;
+  const cmd = String((input && (input.command || input.cmd)) || '');
+  if (cmd) {
+    // destructive or outbound shell — deletes, force-resets, pushes, POSTs, power, publishes
+    if (/\b(rm|del|erase|rmdir|rd)\b/i.test(cmd)) return true;
+    if (/Remove-Item|Clear-Content|Clear-Recyclebin/i.test(cmd)) return true;
+    if (/git\s+(push|reset\s+--hard|clean\s+-\w*f)/i.test(cmd)) return true;
+    if (/\b(format|shutdown|restart-computer|stop-computer)\b/i.test(cmd)) return true;
+    if (/npm\s+publish|(^|\s)gh\s+(pr|release)\s+(create|merge)/i.test(cmd)) return true;
+    if (/-Method\s+(Post|Put|Delete)|curl[^|]*-X\s*(POST|PUT|DELETE)/i.test(cmd)) return true;
+    if (/crm-delete/i.test(cmd)) return true;
+    return false; // any other command is treated as safe/reversible
+  }
+  return false;
+}
+
+app.post('/api/jarvis/approval-request', express.json({ limit: '64kb' }), async (req, res) => {
+  const body = req.body || {};
+  const risk = ['read', 'write', 'open', 'execute', 'screen', 'control', 'external', 'destructive', 'money', 'unknown'].includes(String(body.risk))
+    ? String(body.risk) : 'unknown';
+  const info = {
+    id: 'ap-' + Date.now().toString(36) + '-' + (approvalSeq++),
+    tool: String(body.tool_name || 'unknown').slice(0, 80),
+    input: body.input && typeof body.input === 'object' ? body.input : {},
+    risk,
+    summary: String(body.summary || '').slice(0, 240),
+    at: new Date().toISOString(),
+  };
+  const requiresApproval = body.require_approval === true || isRisky(info.tool, info.input);
+  if (!requiresApproval) {
+    recordJarvisEvent('approval.auto', { tool: info.tool, risk: info.risk });
+    return res.json({ allow: true, mode: 'preauthorized-local' });
+  }
+  recordJarvisEvent('approval.requested', { tool: info.tool, risk: info.risk });
+  const decision = await new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      pendingApprovals.delete(info.id);
+      approvalBroadcast({ type: 'resolved', id: info.id, allow: false });
+      resolve({ allow: false, reason: 'timed out waiting for Yish (90s) — denied by default' });
+    }, APPROVAL_TIMEOUT);
+    pendingApprovals.set(info.id, { info, resolve: (d) => { clearTimeout(timer); resolve(d); } });
+    approvalBroadcast({ type: 'approval', ...info });
+  });
+  res.json(decision);
+});
+
+app.post('/api/jarvis/tool-event', express.json({ limit: '8kb' }), (req, res) => {
+  const body = req.body || {};
+  const fields = {
+    tool: String(body.tool || 'unknown').slice(0, 80),
+    risk: String(body.risk || 'unknown').slice(0, 20),
+  };
+  if (Number.isFinite(Number(body.ms))) fields.ms = Math.round(Number(body.ms));
+  if (body.ok !== undefined) fields.ok = !!body.ok;
+  const event = String(body.event || 'event').replace(/[^a-z0-9_.-]/gi, '').slice(0, 40);
+  recordJarvisEvent('tool.' + event, fields);
+  res.json({ ok: true });
+});
+
+app.get('/api/jarvis/approvals', (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.flushHeaders();
+  approvalClients.add(res);
+  // replay anything already pending so a fresh page can still answer
+  for (const { info } of pendingApprovals.values()) {
+    try { res.write('data: ' + JSON.stringify({ type: 'approval', ...info }) + '\n\n'); } catch { /* ignore */ }
+  }
+  const bye = () => approvalClients.delete(res);
+  req.on('close', bye);
+  res.on('error', bye);
+});
+
+app.get('/api/jarvis/approvals-pending', (req, res) => {
+  res.json({ pending: [...pendingApprovals.values()].map((p) => p.info) });
+});
+
+// Wake acknowledgments - short canned lines spoken after "Hey Jarvis". They use
+// the same TTS provider path as normal replies, so ElevenLabs and local Andrew
+// stay consistent. Results are cached in memory per server run for instant reuse.
+const cannedVoiceCache = new Map();
+async function sendCannedVoice(res, key, text, legacyPath) {
+  try {
+    let audio = cannedVoiceCache.get(key);
+    if (!audio) {
+      audio = await synthesizeAudio(text);
+      cannedVoiceCache.set(key, audio);
+    }
+    res.setHeader('Content-Type', audio.contentType || 'audio/wav');
+    res.setHeader('X-Jarvis-TTS-Provider', audio.provider || 'local');
+    res.setHeader('Cache-Control', 'no-store');
+    return res.end(audio.buffer);
+  } catch {
+    res.setHeader('X-Jarvis-TTS-Provider', 'legacy-local');
+    return res.sendFile(legacyPath, (err) => {
+      if (err && !res.headersSent) res.status(404).json({ error: 'canned voice unavailable' });
+    });
+  }
+}
+app.get('/api/jarvis/acks', (req, res) => res.json({ count: ACK_LINES.length, lines: ACK_LINES }));
+app.get('/api/jarvis/ack', async (req, res) => {
+  const i = Math.max(0, Math.min(ACK_LINES.length - 1, Number(req.query.i) || 0));
+  await sendCannedVoice(res, 'ack:' + i + ':' + ACK_LINES[i], ACK_LINES[i], ackPath(i));
+});
+app.get('/api/jarvis/fillers', (req, res) => res.json({ count: FILLER_LINES.length }));
+app.get('/api/jarvis/filler', async (req, res) => {
+  const i = Math.max(0, Math.min(FILLER_LINES.length - 1, Number(req.query.i) || 0));
+  await sendCannedVoice(res, 'filler:' + i + ':' + FILLER_LINES[i], FILLER_LINES[i], fillerPath(i));
+});
+// Launch greeting — the "Good evening, sir" moment. Frontend calls this once
+// per day on first open; the reply is spoken client-side.
+app.post('/api/jarvis/greet', async (req, res) => {
+  const hour = new Date().getHours();
+  const period = hour < 12 ? 'morning' : hour < 18 ? 'afternoon' : 'evening';
+  res.json({ text: `Good ${period}, sir. All systems are online.`, at: new Date().toISOString(), provider: 'local-direct' });
+});
+
+// Lead nudges — watch the Nextdoor store and push new leads to the Jarvis UI
+// over the same SSE channel as approvals (event type 'nudge', spoken client-side).
+// Seeded with current leads on boot so a restart never replays old ones.
+const seenLeads = new Set();
+let leadsSeeded = false;
+async function pollLeadNudges() {
+  let store;
+  try { store = await readNextdoorStore(); } catch { return; }
+  const leads = (store && Array.isArray(store.leads)) ? store.leads : [];
+  if (!leadsSeeded) { for (const l of leads) seenLeads.add(l._key || l.title); leadsSeeded = true; return; }
+  for (const l of leads) {
+    const key = l._key || l.title;
+    if (!key || seenLeads.has(key)) continue;
+    seenLeads.add(key);
+    const what = String(l.title || 'a detailing post').slice(0, 140);
+    const where = l.area ? ' in ' + l.area : '';
+    approvalBroadcast({ type: 'nudge', kind: 'lead', text: 'New Nextdoor lead' + where + ': ' + what });
+  }
+}
+setTimeout(() => pollLeadNudges().catch(() => {}), 20 * 1000);
+setInterval(() => pollLeadNudges().catch(() => {}), 5 * 60 * 1000);
+
+// Durable local reminders share the nudge channel, so a due reminder appears
+// and is spoken even when it was created in an earlier Jarvis session.
+const JARVIS_REMINDERS_FILE = path.resolve(process.env.JARVIS_REMINDERS_FILE || path.join(AIOS_DATA_DIR, 'jarvis-reminders.json'));
+let reminderPollBusy = false;
+async function pollReminderNudges() {
+  if (reminderPollBusy) return;
+  reminderPollBusy = true;
+  try {
+    let store;
+    try { store = JSON.parse(await fsp.readFile(JARVIS_REMINDERS_FILE, 'utf8')); }
+    catch { return; }
+    const reminders = Array.isArray(store.reminders) ? store.reminders : [];
+    const now = Date.now();
+    const due = reminders.filter((item) => item && item.status === 'pending' && !item.firedAt && Number.isFinite(Date.parse(item.dueAt)) && Date.parse(item.dueAt) <= now).slice(0, 5);
+    if (!due.length) return;
+    const firedAt = new Date().toISOString();
+    for (const item of due) item.firedAt = firedAt;
+    store.updatedAt = firedAt;
+    await writeJsonAtomic(JARVIS_REMINDERS_FILE, store);
+    for (const item of due) {
+      const title = String(item.title || 'Reminder').slice(0, 180);
+      const note = String(item.note || '').slice(0, 220);
+      approvalBroadcast({ type: 'nudge', kind: 'reminder', id: item.id, text: 'Reminder: ' + title + (note ? '. ' + note : '') });
+      recordJarvisEvent('reminder.fired', { reminderId: String(item.id || '').slice(0, 100) });
+    }
+  } finally { reminderPollBusy = false; }
+}
+setTimeout(() => pollReminderNudges().catch(() => {}), 8 * 1000);
+setInterval(() => pollReminderNudges().catch(() => {}), 15 * 1000);
+
+app.post('/api/jarvis/approval-response', express.json({ limit: '16kb' }), (req, res) => {
+  const { id, allow } = req.body || {};
+  const pending = pendingApprovals.get(String(id || ''));
+  if (!pending) return res.status(404).json({ error: 'no such pending approval' });
+  pendingApprovals.delete(String(id));
+  approvalBroadcast({ type: 'resolved', id: String(id), allow: !!allow });
+  pending.resolve({ allow: !!allow, reason: allow ? undefined : 'Yish denied this action.' });
+  res.json({ ok: true });
+});
+
+// Jarvis offline STT — proxy the browser's captured audio to the local
+// JarvisVoice service (Whisper) so the page stays same-origin. voice-status lets
+// the frontend know whether offline STT is available (else it uses browser voice).
+const VOICE_SERVICE = process.env.JARVIS_VOICE_URL || 'http://127.0.0.1:3100';
+
+app.get('/api/jarvis/voice-status', async (req, res) => {
+  const started = performance.now();
+  try {
+    const r = await fetch(VOICE_SERVICE + '/health', { signal: AbortSignal.timeout(2000) });
+    const j = await r.json();
+    jarvisRuntime.voiceStatus = {
+      stt: !!(j && j.ok), model: j && j.model, mode: j && j.mode,
+      audioAgeSec: j && j.audioAgeSec, latencyMs: Math.round(performance.now() - started),
+      checkedAt: new Date().toISOString(),
+    };
+    res.json({ ...jarvisRuntime.voiceStatus, tts: TTS_PROVIDER, elevenlabs: ELEVENLABS_ENABLED });
+  } catch (e) {
+    jarvisRuntime.voiceStatus = {
+      stt: false, error: String((e && e.message) || e),
+      latencyMs: Math.round(performance.now() - started), checkedAt: new Date().toISOString(),
+    };
+    res.json({ ...jarvisRuntime.voiceStatus, tts: TTS_PROVIDER, elevenlabs: ELEVENLABS_ENABLED });
+  }
+});
+
+// Coordinated listening: JarvisVoice keeps the one physical mic stream and
+// returns a transcript after its server-side VAD sees the utterance end.
+app.post('/api/jarvis/listen', async (req, res) => {
+  const followup = String(req.query.followup || '') === '1';
+  const started = performance.now();
+  recordJarvisEvent('listen.start', { followup });
+  try {
+    const r = await fetch(VOICE_SERVICE + '/listen?followup=' + (followup ? '1' : '0'), {
+      method: 'POST', signal: AbortSignal.timeout(70000),
+    });
+    const j = await r.json().catch(() => ({ text: '', speech: false, reason: 'invalid-response' }));
+    recordJarvisEvent('listen.done', {
+      followup, status: r.status, speech: !!j.speech, reason: String(j.reason || '').slice(0, 40),
+      captureMs: Number(j.captureMs) || 0, sttMs: Number(j.sttMs) || 0,
+      proxyMs: Math.round(performance.now() - started),
+    });
+    res.status(r.status).json(j);
+  } catch (e) {
+    const error = String((e && e.message) || e);
+    recordJarvisEvent('listen.error', { followup, error: error.slice(0, 160), ms: Math.round(performance.now() - started) });
+    res.status(502).json({ text: '', speech: false, reason: 'voice-service-unreachable', error });
+  }
+});
+
+// Streaming voice proxy. JarvisVoice flushes a speech-ended NDJSON event as
+// soon as its VAD closes the microphone, then sends the transcript after
+// Whisper finishes. Keeping those phases separate prevents STT time from
+// looking like extra listening time in the HUD.
+app.post('/api/jarvis/listen-stream', async (req, res) => {
+  const followup = String(req.query.followup || '') === '1';
+  const started = performance.now();
+  recordJarvisEvent('listen.stream.start', { followup });
+  try {
+    const r = await fetch(VOICE_SERVICE + '/listen/stream?followup=' + (followup ? '1' : '0'), {
+      method: 'POST', signal: AbortSignal.timeout(70000),
+    });
+    res.status(r.status);
+    res.setHeader('Content-Type', r.headers.get('content-type') || 'application/x-ndjson');
+    res.setHeader('Cache-Control', 'no-store');
+    if (!r.body) throw new Error('voice service returned no stream');
+    res.flushHeaders();
+
+    const reader = r.body.getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (res.destroyed) {
+        await reader.cancel().catch(() => {});
+        break;
+      }
+      res.write(Buffer.from(value));
+    }
+    if (!res.writableEnded && !res.destroyed) res.end();
+    recordJarvisEvent('listen.stream.done', {
+      followup, status: r.status, proxyMs: Math.round(performance.now() - started),
+    });
+  } catch (e) {
+    const error = String((e && e.message) || e);
+    recordJarvisEvent('listen.stream.error', {
+      followup, error: error.slice(0, 160), ms: Math.round(performance.now() - started),
+    });
+    if (res.headersSent) {
+      if (!res.writableEnded && !res.destroyed) {
+        res.write(JSON.stringify({ type: 'error', speech: false, reason: 'voice-service-unreachable', error }) + '\n');
+        res.end();
+      }
+    } else {
+      res.status(502).json({ type: 'error', text: '', speech: false, reason: 'voice-service-unreachable', error });
+    }
+  }
+});
+
+app.post('/api/jarvis/listen/cancel', async (req, res) => {
+  try {
+    const r = await fetch(VOICE_SERVICE + '/listen/cancel', { method: 'POST', signal: AbortSignal.timeout(2000) });
+    res.status(r.status).json(await r.json());
+  } catch (e) {
+    res.status(502).json({ ok: false, error: String((e && e.message) || e) });
+  }
+});
+
+app.post('/api/jarvis/wake-suppress', async (req, res) => {
+  const ms = Math.min(120000, Math.max(0, toNumber(req.query.ms, 3000)));
+  try {
+    const r = await fetch(VOICE_SERVICE + '/wake/suppress?ms=' + ms, { method: 'POST', signal: AbortSignal.timeout(2000) });
+    res.status(r.status).json(await r.json());
+  } catch (e) {
+    res.status(502).json({ ok: false, error: String((e && e.message) || e) });
+  }
+});
+
+app.post('/api/jarvis/telemetry', express.json({ limit: '16kb' }), (req, res) => {
+  const body = req.body || {};
+  const fields = {};
+  for (const key of ['state', 'from', 'to', 'mode', 'reason', 'provider']) {
+    if (body[key] != null) fields[key] = String(body[key]).slice(0, 80);
+  }
+  for (const key of ['ms', 'captureMs', 'sttMs', 'ttftMs', 'ttsMs']) {
+    if (Number.isFinite(Number(body[key]))) fields[key] = Math.round(Number(body[key]));
+  }
+  recordJarvisEvent(body.event || 'client', fields);
+  res.json({ ok: true });
+});
+
+app.get('/api/jarvis/diagnostics', (req, res) => {
+  const scheduled = performance.now();
+  setTimeout(() => {
+    res.json({
+      startedAt: jarvisRuntime.startedAt,
+      uptimeSec: Math.round(process.uptime()),
+      eventLoopLagMs: Math.round(performance.now() - scheduled),
+      brain: getCodexStatus(),
+      voice: jarvisRuntime.voiceStatus,
+      events: jarvisRuntime.events.slice(-80),
+      requests: jarvisRuntime.requests.slice(-50),
+    });
+  }, 0);
+});
+
+app.post('/api/jarvis/stt', express.raw({ type: ['audio/wav', 'application/octet-stream'], limit: '12mb' }), async (req, res) => {
+  if (!req.body || !req.body.length) return res.status(400).json({ error: 'empty audio', text: '' });
+  try {
+    const r = await fetch(VOICE_SERVICE + '/stt', {
+      method: 'POST', headers: { 'Content-Type': 'audio/wav' }, body: req.body, signal: AbortSignal.timeout(60000),
+    });
+    const j = await r.json().catch(() => ({ text: '' }));
+    res.status(r.status).json(j);
+  } catch (e) {
+    res.status(502).json({ error: 'voice service unreachable: ' + String((e && e.message) || e), text: '' });
+  }
+});
+
+app.post('/api/jarvis/tts', express.json({ limit: '32kb' }), async (req, res) => {
+  const body = req.body || {};
+  const text = typeof body.text === 'string' ? body.text : '';
+  if (!text.trim()) return res.status(400).json({ error: 'empty text' });
+  try {
+    const audio = await synthesizeAudio(text, { voice: body.voice, rate: body.rate });
+    res.setHeader('Content-Type', audio.contentType || 'audio/wav');
+    res.setHeader('X-Jarvis-TTS-Provider', audio.provider || 'local');
+    res.setHeader('Cache-Control', 'no-store');
+    res.end(audio.buffer);
+  } catch (e) {
+    res.status(502).json({ error: String((e && e.message) || e) });
+  }
 });
 
 // Same-origin image proxy — social CDNs (TikTok/Instagram) send a
@@ -502,6 +1010,9 @@ if (tailscaleIp) {
 
 console.log(`[AIOS] data dir: ${AIOS_DATA_DIR}`);
 console.log(`[AIOS] claude:   ${CLAUDE.value} [${CLAUDE.kind}]  (cwd: ${CLAUDE_CWD})`);
+initializeCodex()
+  .then((status) => console.log(`[AIOS] Jarvis brain: ${status.model} via Codex SDK (${status.isolatedHome ? 'isolated' : 'shared'} home)`))
+  .catch((e) => console.error('[AIOS] Jarvis Codex initialization failed:', String((e && e.message) || e)));
 if (!pty) console.warn('[AIOS] node-pty unavailable — terminal disabled.', (ptyError && ptyError.message) || '');
 
 // Warm the social cache once on boot (no-op without an Apify token).

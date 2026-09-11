@@ -96,7 +96,7 @@
           <span class="notif-time">${esc(AIOS.fmt.ago(n.ts))}</span>
         </div>`).join('')
       : `<div class="notif-empty">All quiet</div>`;
-    p.innerHTML = `<div class="notif-head"><span>Notifications</span><button class="notif-clear" id="notifClear">mark all read</button></div>${items}`;
+    p.innerHTML = `<div class="notif-head"><span>Notifications</span><button class="notif-clear" id="notifClear" title="Clear all notifications">clear all</button></div>${items}`;
   }
   function togglePanel(force) {
     const p = $('notifPanel');
@@ -110,8 +110,9 @@
     $('notifBtn') && $('notifBtn').addEventListener('click', (e) => { e.stopPropagation(); togglePanel(); });
     $('notifPanel').addEventListener('click', (e) => {
       if (e.target.closest('#notifClear')) {
-        notifs.forEach((n) => { n.read = true; });
+        notifs = [];
         saveNotifs(); badge(); renderPanel();
+        AIOS.toast('Notifications cleared', 'ok');
         return;
       }
       const item = e.target.closest('[data-nid]');

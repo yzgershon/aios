@@ -599,8 +599,25 @@ tbody tr:hover { background: rgba(10, 132, 255, 0.05); }
   border-bottom: 1px solid var(--line);
   z-index: 1;
 }
-.notif-clear { font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--cyan); }
-.notif-clear:hover { text-shadow: 0 0 8px rgba(100, 210, 255, 0.6); }
+.notif-clear {
+  padding: 5px 9px;
+  border: 1px solid rgba(100, 210, 255, 0.3);
+  border-radius: 999px;
+  background: rgba(100, 210, 255, 0.08);
+  box-shadow: inset 0 0 14px rgba(100, 210, 255, 0.05);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--cyan);
+  transition: border-color 160ms ease, background 160ms ease, box-shadow 160ms ease, transform 160ms ease;
+}
+.notif-clear:hover {
+  border-color: rgba(100, 210, 255, 0.62);
+  background: rgba(100, 210, 255, 0.14);
+  box-shadow: 0 0 16px rgba(100, 210, 255, 0.2), inset 0 0 14px rgba(100, 210, 255, 0.08);
+  transform: translateY(-1px);
+}
 .notif-item {
   display: flex;
   gap: 10px;

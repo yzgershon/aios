@@ -117,6 +117,7 @@
     if (!nav) return;
     nav.innerHTML = '';
     for (const p of pages) {
+      if (p.hidden) continue; // mounted + reachable via showPage, just no nav icon
       const b = document.createElement('button');
       b.className = 'side-item';
       b.dataset.page = p.id;

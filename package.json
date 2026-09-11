@@ -5,9 +5,13 @@
   "description": "Yish's AI Operating System — single-pane local dashboard with an embedded Claude Code terminal",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "smoke:jarvis-mcp": "node scripts/smoke-jarvis-mcp.js",
+    "smoke:jarvis-codex": "node scripts/smoke-codex-brain.js",
+    "smoke:jarvis-state": "node scripts/smoke-jarvis-state.js"
   },
   "dependencies": {
+    "@openai/codex-sdk": "^0.144.1",
     "express": "^4.21.2",
     "imapflow": "^1.3.5",
     "mailparser": "^3.9.9",

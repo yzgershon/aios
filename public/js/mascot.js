@@ -441,10 +441,13 @@
     const m = positionBed();
     sleeping = true; setPose('curled');
     if (m) placeCurl(m); else placeFeet(innerWidth * 0.6, innerHeight * 0.5);
-    dog.style.visibility = 'visible';
+    // respect the active page — booting straight into another tab (JarvisApp
+    // opens on Second Brain) must not leave Robbie standing on it
+    dog.style.visibility = onDash ? 'visible' : 'hidden';
+    if (bed && !onDash) bed.style.display = 'none';
     applyTransform();
     scheduleZzz();
-    if (!RM.matches) startLoop();
+    if (!RM.matches && onDash) startLoop();
     return true;
   }
   function boot() {

@@ -1,6 +1,7 @@
 # Handoff
 
 Last updated:
+- 2026-07-07 by Codex
 - 2026-07-02 by Codex
 
 Current goal:
@@ -56,3 +57,46 @@ How to verify:
 - Open: `http://localhost:3000`
 - Check: `node scripts/verify.js`
 - Expected result: verifier returns `{"ok": true, "count": 0, "issues": []}`.
+
+## 2026-07-07 - Jarvis/Ollama Local Model Handoff
+
+Current Jarvis direction:
+- Use local Ollama/Gemma for easy fast-lane voice turns to reduce Claude usage.
+- Keep Claude as the deep lane for vault/tool/action/computer requests until local tool calling is safely wired.
+
+What changed:
+- `C:\Dev\AIOS\lib\jarvis.js`: `JARVIS_FAST_MODEL` now defaults to `gemma4:latest`.
+- AIOS fast-lane Ollama request now uses `num_ctx: 4096`, `think: false`, `keep_alive: "24h"`, `num_predict: 120`, and `temperature: 0.6`.
+- `C:\Dev\Flow\src\AppSettings.cs`, `C:\Dev\Flow\ui\index.html`, `C:\Dev\Flow\README.md`, and live `%APPDATA%\Flow\settings.json` now point Flow's AI polish model at `gemma4:latest` instead of the broken `llama3.2` tag.
+
+Model inventory:
+- `gemma4:latest`: 8B Q4_K_M, capabilities include completion, vision, audio, tools, thinking. This is the strongest installed local overall model.
+- `llama3.1:latest`: 8B Q4_K_M, tools capable. This is the strongest installed Llama-family model.
+- `llama3.2:3b`: 3.2B Q4_K_M, tools capable. Flow's old `llama3.2` setting failed because the installed tag is `llama3.2:3b`.
+- Ollama CLI is not in PATH, but the local API at `http://localhost:11434` works.
+
+Verification:
+- `node --check C:\Dev\AIOS\lib\jarvis.js` passed.
+- Direct Ollama `/api/chat` with `gemma4:latest`, `num_ctx: 4096`, and `think: false` worked.
+- AIOS restarted successfully and `/api/health` returned ok.
+- `/api/jarvis/chat-stream` returned local fast-lane replies in about 8-9 seconds after disabling thinking.
+
+Important unfinished work:
+- No local Ollama/Gemma tools were added yet.
+- Safe first local tools should be read-only: current time, AIOS health, Jarvis voice status, local model status/list, goals, todos, portfolio, pipeline, Nextdoor lead snapshot, and small vault search.
+- Keep write/run/open/send/post/delete/purchase actions behind Claude approval.
+
+Updated by Codex at 2026-07-07 13:21:55 -04:00.
+
+## 2026-07-16 - Jarvis turn endpointing and STT latency
+
+Live now:
+
+- The browser uses `/api/jarvis/listen-stream`; AIOS proxies NDJSON from JarvisVoice without buffering.
+- JarvisVoice flushes `speech-ended` as soon as VAD closes capture. The UI removes the red mic state and switches to thinking before Whisper returns the transcript.
+- Short turns endpoint after about 560 ms of silence. Turns with at least four seconds of voiced audio receive about 800 ms for safer natural pauses.
+- JarvisVoice uses Whisper.net 1.9.1, `ggml-tiny.en.bin`, 4 threads, deterministic single-segment decoding, and automatic 768/full audio context.
+- Final staging benchmarks: 321 ms average for a 1.5-second synthetic time question; 1,575 ms average for a seven-second request. Promoted live measurements with the full stack running were 1,515 ms and 3,400 ms respectively.
+- Chrome QA passed for Command Center and Second Brain with no console warnings/errors. Live no-speech streaming, direct STT, health, and wake re-arm checks passed.
+
+Jarvis-side details and rollback instructions are in `C:\Dev\Jarvis\HANDOFF.md`. Pre-change snapshot: `C:\Dev\.codex-backups\Jarvis-endpointing-20260716-001040`.
