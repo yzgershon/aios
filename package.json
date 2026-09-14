@@ -8,7 +8,8 @@
     "start": "node server.js",
     "smoke:jarvis-mcp": "node scripts/smoke-jarvis-mcp.js",
     "smoke:jarvis-codex": "node scripts/smoke-codex-brain.js",
-    "smoke:jarvis-state": "node scripts/smoke-jarvis-state.js"
+    "smoke:jarvis-state": "node scripts/smoke-jarvis-state.js",
+    "test:jarvis": "node --test scripts/test-jarvis-*.js"
   },
   "dependencies": {
     "@openai/codex-sdk": "^0.144.1",

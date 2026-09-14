@@ -241,31 +241,55 @@
   // Jarvis starts talking while the rest of the reply is still being generated.
   let inflight = false; // guards double-submits; NOT tied to orb state (the STT
                         // path parks the orb on 'thinking' before calling send)
+  let turnSerial = 0;
+  let turnController = null;
+  function cancelTurn() {
+    turnSerial++;
+    if (turnController) turnController.abort();
+    turnController = null;
+    inflight = false;
+    lastInputWasVoice = false;
+    stopSpeaking();
+    setSendEnabled(true);
+    setState('idle');
+  }
   async function send(text, opts) {
     const msg = (text || '').trim();
-    if (!msg || inflight) return;
+    if (!msg) return;
+    if (inflight) cancelTurn();
     inflight = true;
+    const serial = ++turnSerial;
+    const controller = new AbortController();
+    turnController = controller;
+    let timeout;
+    const armTimeout = (ms) => {
+      clearTimeout(timeout);
+      timeout = setTimeout(() => controller.abort(new Error('JARVIS took too long to respond. Please try again.')), ms);
+    };
+    armTimeout(60000);
     const turnStarted = performance.now();
     let firstDeltaSeen = false;
     trace('brain.start', { mode: opts && opts.voice ? 'voice' : 'text' });
     lastInputWasVoice = !!(opts && opts.voice);
     stopSpeaking();
+    moreComing = true;
     if (capturing) stopCapture(true); // typed mid-listen: drop the open mic
     // dead-air filler: if no audio has started ~1.3s in, say "On it." etc.
     let fillerTimer = null;
     if (lastInputWasVoice && fillerBlobs.length) {
       fillerTimer = setTimeout(() => {
-        if (inflight && !speaking && !speechQ.length) {
-          speechQ.push({ text: '', gen: qGen, wav: Promise.resolve(fillerBlobs[Math.floor(Math.random() * fillerBlobs.length)]) });
+        if (serial === turnSerial && inflight && !firstDeltaSeen && !speaking && !speechQ.length) {
+          speechQ.push({ text: '', gen: qGen, wav: Promise.resolve({ blob: fillerBlobs[Math.floor(Math.random() * fillerBlobs.length)], provider: 'local' }) });
           drainSpeech();
         }
       }, 1300);
     }
     addMsg('user', msg);
+    AIOS.bus.emit('jarvis:task-start', msg);
     history.push({ role: 'user', content: msg });
     setState('thinking');
     setSendEnabled(false);
-    let bubble = null, shown = '', speakBuf = '', gotDelta = false;
+    let bubble = null, shown = '', speakBuf = '';
 
     const takeSentences = (flushAll) => {
       // peel complete sentences off speakBuf and queue them for speech
@@ -273,6 +297,8 @@
         const m = speakBuf.match(/[.!?…]["')\]]*(\s+|$)|\n+/);
         if (!m) break;
         const cut = m.index + m[0].length;
+        const prefix = speakBuf.slice(0, cut);
+        if (prefix.lastIndexOf('[') > prefix.lastIndexOf(']') || /\]\([^)]*$/.test(prefix)) break;
         const sentence = speakBuf.slice(0, cut).trim();
         speakBuf = speakBuf.slice(cut);
         if (sentence) enqueueSpeech(sentence);
@@ -280,13 +306,15 @@
       if (flushAll && speakBuf.trim()) { enqueueSpeech(speakBuf.trim()); speakBuf = ''; }
     };
     const onDelta = (t) => {
+      if (serial !== turnSerial) return;
+      if (fillerTimer) clearTimeout(fillerTimer);
       if (!firstDeltaSeen) {
         firstDeltaSeen = true;
         trace('brain.first-delta', { ttftMs: performance.now() - turnStarted });
       }
-      gotDelta = true;
       if (!bubble) bubble = addMsg('jarvis', '');
       shown += t;
+      AIOS.bus.emit('jarvis:delta', shown);
       bubble.textContent = shown;
       const log = $('jvLog'); if (log) log.scrollTop = log.scrollHeight;
       speakBuf += t;
@@ -297,11 +325,12 @@
       const res = await fetch('/api/jarvis/chat-stream', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message: msg, history: history.slice(0, -1) }),
+        signal: controller.signal,
       });
       if (!res.ok || !res.body) throw new Error('stream ' + res.status);
       const reader = res.body.getReader();
       const dec = new TextDecoder();
-      let sseBuf = '', finalReply = '', streamErr = null;
+      let sseBuf = '', finalReply = '', streamErr = null, completed = false;
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
@@ -313,43 +342,49 @@
           if (!line) continue;
           let ev; try { ev = JSON.parse(line.slice(6)); } catch { continue; }
           if (ev.type === 'delta' && ev.text) onDelta(ev.text);
-          else if (ev.type === 'done') finalReply = ev.reply || '';
+          else if (ev.type === 'status') {
+            armTimeout(ev.status === 'in_progress' ? 125000 : 60000);
+            AIOS.bus.emit('jarvis:activity', { tool: ev.tool, event: ev.status === 'in_progress' ? 'started' : 'completed' });
+          }
+          else if (ev.type === 'done') { finalReply = ev.reply || ''; completed = true; }
           else if (ev.type === 'error') streamErr = ev.error || 'stream error';
         }
       }
-      if (streamErr && !shown) throw new Error(streamErr);
-      const reply = (finalReply || shown || '(no reply)').trim();
+      if (serial !== turnSerial) return;
+      if (streamErr) throw new Error(streamErr);
+      if (!completed) throw new Error('The connection ended before JARVIS finished. Please try again.');
+      const reply = (finalReply || shown).trim();
+      if (!reply) throw new Error('JARVIS returned an empty response. Please try again.');
       if (!bubble) bubble = addMsg('jarvis', '');
       bubble.textContent = reply;
       // speak whatever the sentence-splitter hasn't flushed (plus any tail the
       // final result had that deltas missed)
       if (reply.length > shown.length) speakBuf += reply.slice(shown.length);
       takeSentences(true);
-      if (!gotDelta && reply) enqueueSpeech(reply); // no-delta fallback: speak it all
       history.push({ role: 'assistant', content: reply });
       AIOS.bus.emit('jarvis:reply', { q: msg, a: reply });
       speechDone(); // signal: no more sentences coming
       trace('brain.done', { ms: performance.now() - turnStarted });
     } catch (e) {
-      // streaming path failed — fall back to the blocking endpoint
-      try {
-        const res = await AIOS.api.post('/api/jarvis/chat', { message: msg, history: history.slice(0, -1) });
-        const reply = (res && res.reply) ? res.reply : '(no reply)';
-        if (!bubble) bubble = addMsg('jarvis', '');
-        bubble.textContent = reply;
-        history.push({ role: 'assistant', content: reply });
-        AIOS.bus.emit('jarvis:reply', { q: msg, a: reply });
-        speak(reply);
-      } catch (e2) {
-        trace('brain.error', { reason: String((e2 && e2.message) || e2).slice(0, 80), ms: performance.now() - turnStarted });
-        if (bubble) bubble.remove();
-        addMsg('jarvis', 'Something broke reaching the brain: ' + String((e2 && e2.message) || e2), 'err');
-        setState('idle');
-      }
+      if (serial !== turnSerial) return;
+      // A failed stream may already have executed tools. Never replay the turn.
+      const error = controller.signal.aborted ? (controller.signal.reason?.message || 'Request cancelled.') : String(e?.message || e);
+      lastInputWasVoice = false;
+      stopSpeaking();
+      trace('brain.error', { reason: error.slice(0, 80), ms: performance.now() - turnStarted });
+      if (bubble) { bubble.className = 'jv-msg err'; bubble.textContent = shown + '\n\n' + error; }
+      else addMsg('jarvis', error, 'err');
+      AIOS.bus.emit('jarvis:error', error);
+      setState('idle');
     } finally {
+      clearTimeout(timeout);
       if (fillerTimer) clearTimeout(fillerTimer);
-      inflight = false;
-      setSendEnabled(true);
+      if (serial === turnSerial) {
+        turnController = null;
+        inflight = false;
+        setSendEnabled(true);
+        if (!speaking && !speechQ.length && !moreComing) maybeFollowUp();
+      }
     }
   }
 
@@ -362,21 +397,31 @@
   let speaking = false;
   let moreComing = false;
   let qGen = 0; // bumped by stopSpeaking() to cancel a superseded queue
+  const ttsRequests = new Set();
+  let cancelPlayback = null;
 
   function fetchTtsBlob(text) {
     const started = performance.now();
+    const controller = new AbortController();
+    ttsRequests.add(controller);
+    const timer = setTimeout(() => controller.abort(), 12000);
     return fetch('/api/jarvis/tts', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }),
+      signal: controller.signal,
     }).then(async (r) => {
       if (!r.ok) throw new Error('tts ' + r.status);
       const provider = r.headers.get('X-Jarvis-TTS-Provider') || 'local';
       const blob = await r.blob();
       trace('tts.ready', { provider, ttsMs: performance.now() - started });
       return { blob, provider };
-    });
+    }).finally(() => { clearTimeout(timer); ttsRequests.delete(controller); });
   }
 
   function enqueueSpeech(text) {
+    text = String(text || '').replace(/\[([^\]]+)\]\(https?:\/\/[^)]+\)/g, '$1')
+      .replace(/https?:\/\/\S+/g, '').replace(/[^]*/g, '')
+      .replace(/(^|\n)\s*#{1,6}\s*/g, '$1').replace(/[*`]/g, '').trim();
+    if (!text) return;
     moreComing = true;
     const item = { text, gen: qGen, wav: fetchTtsBlob(text).catch(() => null) };
     speechQ.push(item);
@@ -404,11 +449,13 @@
       }
     }
     speaking = false;
-    if (!moreComing) {
+    if (!moreComing && !inflight && !capturing) {
       setState('idle');
       // conversation loop: the barge-in monitor (if still open) becomes the
       // follow-up window; otherwise open a fresh one
       maybeFollowUp();
+    } else if (inflight && !capturing) {
+      setState('thinking');
     }
   }
 
@@ -431,11 +478,13 @@
         if (watch) clearInterval(watch);
         URL.revokeObjectURL(url);
         if (currentAudio === audio) currentAudio = null;
+        if (cancelPlayback === fin) cancelPlayback = null;
         setWakeSuppressed(false);
         resolve();
       };
       audio.onended = fin;
       audio.onerror = fin;
+      cancelPlayback = fin;
       audio.play().catch(fin);
       watch = setInterval(() => {
         if (gen !== qGen) { try { audio.pause(); } catch { /* ignore */ } fin(); }
@@ -446,14 +495,17 @@
 
   function browserSpeakAsync(text) {
     return new Promise((resolve) => {
-      if (!window.speechSynthesis) return resolve();
+      if (!text || !window.speechSynthesis) return resolve();
       if (!ttsVoice) ttsVoice = pickVoice();
       const u = new SpeechSynthesisUtterance(text);
       if (ttsVoice) u.voice = ttsVoice;
       u.rate = 1.0; u.pitch = 0.9;
       u.onstart = () => { setWakeSuppressed(true); setState('speaking'); };
-      u.onend = () => { setWakeSuppressed(false); resolve(); };
-      u.onerror = () => { setWakeSuppressed(false); resolve(); };
+      const timer = setTimeout(() => { speechSynthesis.cancel(); finish(); }, 30000);
+      const finish = () => { clearTimeout(timer); if (cancelPlayback === finish) cancelPlayback = null; setWakeSuppressed(false); resolve(); };
+      cancelPlayback = finish;
+      u.onend = finish;
+      u.onerror = finish;
       setVoiceBadge('browser');
       speechSynthesis.speak(u);
     });
@@ -469,40 +521,8 @@
 
   async function speak(text) {
     stopSpeaking();
-    setState('speaking');
-    try {
-      const res = await fetch('/api/jarvis/tts', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }),
-      });
-      if (!res.ok) throw new Error('tts ' + res.status);
-      const provider = res.headers.get('X-Jarvis-TTS-Provider') || 'local';
-      const url = URL.createObjectURL(await res.blob());
-      const audio = new Audio(url);
-      currentAudio = audio;
-      setWakeSuppressed(true);
-      audio.onended = () => { setWakeSuppressed(false); URL.revokeObjectURL(url); if (currentAudio === audio) { currentAudio = null; setState('idle'); } };
-      audio.onerror = () => { setWakeSuppressed(false); URL.revokeObjectURL(url); if (currentAudio === audio) currentAudio = null; browserSpeak(text); };
-      await audio.play();
-      localTtsOk = true;
-      setVoiceBadge(provider === 'elevenlabs' ? 'elevenlabs' : 'local');
-      return;
-    } catch {
-      localTtsOk = null;
-      browserSpeak(text);
-    }
-  }
-  function browserSpeak(text) {
-    if (!window.speechSynthesis) { setState('idle'); return; }
-    if (!ttsVoice) ttsVoice = pickVoice();
-    const u = new SpeechSynthesisUtterance(text);
-    if (ttsVoice) u.voice = ttsVoice;
-    u.rate = 1.0; u.pitch = 0.9;
-    u.onstart = () => { setWakeSuppressed(true); setState('speaking'); };
-    u.onend = () => { setWakeSuppressed(false); setState('idle'); };
-    u.onerror = () => { setWakeSuppressed(false); setState('idle'); };
-    setState('speaking');
-    setVoiceBadge('browser');
-    speechSynthesis.speak(u);
+    enqueueSpeech(text);
+    speechDone();
   }
 
   function pickVoice() {
@@ -517,8 +537,11 @@
     qGen++; // invalidate anything queued or mid-playback
     speechQ.length = 0;
     moreComing = false;
+    for (const controller of ttsRequests) controller.abort();
+    ttsRequests.clear();
     try { if (window.speechSynthesis) speechSynthesis.cancel(); } catch { /* ignore */ }
     if (currentAudio) { try { currentAudio.pause(); } catch { /* ignore */ } currentAudio = null; }
+    if (cancelPlayback) cancelPlayback();
     if (wakeAckCancel) wakeAckCancel();
     setWakeSuppressed(false);
   }
@@ -693,6 +716,7 @@
 
   async function toggleMic() {
     if (capturing) { stopCapture(); return; }
+    if (inflight) cancelTurn();
     if (sttMode !== 'offline') await probeStt();
     if (sttMode !== 'offline') {
       addMsg('jarvis', 'JarvisVoice is restarting. Try the mic again in a moment.', 'err');
@@ -778,6 +802,7 @@
       es.onmessage = (e) => {
         let ev; try { ev = JSON.parse(e.data); } catch { return; }
         if (ev.type === 'approval') renderApproval(ev);
+        else if (ev.type === 'tool-activity' && inflight) AIOS.bus.emit('jarvis:activity', ev);
         else if (ev.type === 'resolved') markResolved(ev.id, ev.allow);
         else if (ev.type === 'nudge' && ev.text) {
           addMsg('jarvis', ev.text);
@@ -832,7 +857,7 @@
               <svg viewBox="0 0 24 24" fill="none"><path d="M4 6h13a3 3 0 013 3v2a3 3 0 01-3 3h-2l-3 3v-3H7a3 3 0 01-3-3V6z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>
             </button>
           </div>
-          <div class="jv-hint" id="jvHint">Click the mic and just talk — Jarvis sends when you pause, answers, then listens again. Interrupt him any time by talking over him. Say "yes" or "no" to permission cards.</div>
+          <div class="jv-hint" id="jvHint">Click the mic and talk. Jarvis answers, then listens for a follow-up. Click the mic or press Ctrl+Alt+J to interrupt. Say "yes" or "no" to permission cards.</div>
         </div>
         <div class="jv-side">
           <div class="jv-side-head"><b>Conversation</b><button class="jv-clear" id="jvClear">clear</button></div>
@@ -857,9 +882,14 @@
       AIOS.toast(convMode ? 'Conversation mode on — talk freely' : 'Conversation mode off — click to talk each turn');
     });
     $('jvSend').addEventListener('click', () => { const i = $('jvInput'); const v = i.value; i.value = ''; send(v); });
-    $('jvClear').addEventListener('click', () => {
-      history.length = 0; stopSpeaking(); setState('idle');
-      $('jvLog').innerHTML = '<div class="jv-empty">Cleared. What next, Yish?</div>';
+    $('jvClear').addEventListener('click', async () => {
+      cancelTurn(); if (capturing) stopCapture(true); history.length = 0;
+      setSendEnabled(false);
+      try {
+        await AIOS.api.post('/api/jarvis/brain-reset', {});
+        $('jvLog').innerHTML = '<div class="jv-empty">Cleared. What next, Yish?</div>';
+      } catch (e) { addMsg('jarvis', 'Could not clear the conversation: ' + String(e?.message || e), 'err'); }
+      finally { setSendEnabled(true); }
     });
     const inp = $('jvInput');
     inp.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); const v = inp.value; inp.value = ''; send(v); } });
@@ -1111,13 +1141,14 @@
       playSummonAnimation({ sound: false });
       AIOS.showPage('brain3d'); // Jarvis lives on the Second Brain tab now
       if (capturing) return;
-      stopSpeaking();
+      cancelTurn();
       await playWakeAck();
       if (activation !== activationSerial) return;
       await new Promise((resolve) => setTimeout(resolve, 140));
       await wakeListen();
     },
-    ask(text) { send(text); },
+    ask(text) { return send(text); },
+    stop() { cancelTurn(); if (capturing) stopCapture(true); },
     mic() { toggleMic(); },
     state() { return state; },
   };

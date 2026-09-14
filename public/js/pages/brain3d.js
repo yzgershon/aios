@@ -67,10 +67,21 @@
   .b3-hud{position:absolute;right:34px;top:56%;transform:translateY(-50%);z-index:6;width:190px;height:190px;cursor:pointer}
   .b3-hud canvas{position:absolute;inset:0;width:100%;height:100%}
   .b3-hud .jl{position:absolute;inset:0;display:grid;place-items:center;font-family:var(--font-mono,'JetBrains Mono',monospace);font-size:13px;letter-spacing:.3em;color:#cfe6ff;text-shadow:0 0 14px rgba(100,210,255,.9);padding-left:.3em;pointer-events:none}
-  .b3-jarvis{position:absolute;left:calc(278px + (100% - 278px - 240px) / 2);transform:translateX(-50%);bottom:22px;z-index:6;width:min(640px,calc(100% - 278px - 260px))}
+  .b3-jarvis{position:absolute;left:calc(278px + (100% - 278px - 240px) / 2);translate:-50% 0;bottom:22px;z-index:6;width:min(640px,calc(100% - 278px - 260px))}
   @media(max-width:1100px){.b3-jarvis{left:50%;width:min(560px,calc(100% - 40px))}}
   .b3-caption{background:rgba(14,32,24,.9);border:1px solid rgba(48,209,88,.35);border-radius:14px;padding:12px 16px;font-size:14px;line-height:1.55;color:#e8f6ec;margin-bottom:10px;backdrop-filter:blur(8px);display:none}
   .b3-caption.show{display:block}
+  .b3-caption{max-height:240px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere}
+  .b3-caption a{color:#87deff;text-decoration:underline}
+  .b3-workbar{display:flex;align-items:center;gap:8px;margin-bottom:9px}
+  .b3-workbar button{border:1px solid #29413d;border-radius:9px;background:#101f1e;color:#c9ede0;padding:7px 10px;cursor:pointer}
+  .b3-activity{flex:1;font-size:12px;color:#b5d6cb;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+  .b3-capabilities{max-height:340px;overflow:auto;background:rgba(8,20,23,.97);border:1px solid #29413d;border-radius:12px;margin-bottom:10px;padding:14px}
+  .b3-capabilities h3{font-size:14px;margin:10px 0 5px;color:#d7f2e7}
+  .b3-capabilities p{font-size:12px;color:#9bbdb5;margin:4px 0 8px}
+  .b3-capabilities button{display:block;width:100%;text-align:left;background:#15282a;border:1px solid #284747;border-radius:8px;color:#cbe7e5;padding:8px;margin:5px 0;cursor:pointer;font:inherit;font-size:12px}
+  .b3-capabilities:not([hidden])~.b3-caption{display:none}
+  .b3-askrow,.b3-ask{min-width:0}
   .b3-askwrap{display:flex;align-items:center;gap:10px}
   .b3-askrow{flex:1;display:flex;align-items:center;background:rgba(8,14,26,.85);border:1px solid var(--line,#22314d);border-radius:999px;padding:4px 6px 4px 18px;backdrop-filter:blur(8px)}
   .b3-ask{flex:1;background:none;border:none;outline:none;color:var(--text,#e8eefc);font-size:14px;padding:9px 0}
@@ -110,13 +121,15 @@
       </div>
       <div class="b3-hud" id="b3Hud" title="Talk to Jarvis"><canvas id="b3HudCv"></canvas><span class="jl">J.A.R.V.I.S.</span></div>
       <div class="b3-jarvis">
+        <div class="b3-capabilities" id="b3Capabilities" hidden></div>
         <div class="b3-caption" id="b3Caption"></div>
+        <div class="b3-workbar"><button id="b3CanDo" aria-expanded="false" aria-controls="b3Capabilities">What can you do?</button><span class="b3-activity" id="b3Activity" role="status"></span><button id="b3Stop" hidden>Stop</button></div>
         <div class="b3-askwrap">
           <div class="b3-askrow">
-            <input class="b3-ask" id="b3Ask" placeholder='Ask · "remind me…" · "good morning" · "show me…" · "what&#39;s due…"' />
+            <input class="b3-ask" id="b3Ask" aria-label="Ask JARVIS" placeholder='Ask · "remind me…" · "good morning" · "show me…" · "what&#39;s due…"' />
           </div>
           <button class="b3-act" id="b3Mic" title="Talk">🎙</button>
-          <button class="b3-act" id="b3Brief" title="Morning brief">☀</button>
+          <button class="b3-act" id="b3Brief" title="Daily briefing">☀</button>
           <button class="b3-act" id="b3Dash" title="Command center">🖥</button>
         </div>
       </div>`;
@@ -163,9 +176,41 @@
     const micBtn = $id('b3Mic');
     micBtn.addEventListener('click', () => AIOS.jarvis && AIOS.jarvis.mic());
     $id('b3Hud').addEventListener('click', () => AIOS.jarvis && AIOS.jarvis.mic());
-    $id('b3Brief').addEventListener('click', () => { caption('…'); if (AIOS.jarvis) AIOS.jarvis.ask('Good morning — give me my brief: what needs action today?'); });
+    $id('b3Brief').addEventListener('click', () => { caption('…'); if (AIOS.jarvis) AIOS.jarvis.ask('Give me my daily briefing: what needs action today?'); });
     $id('b3Dash').addEventListener('click', () => AIOS.showPage('dashboard'));
+    $id('b3Stop').addEventListener('click', () => { AIOS.jarvis?.stop(); $id('b3Activity').textContent = 'Stopped'; $id('b3Stop').hidden = true; });
+    $id('b3CanDo').addEventListener('click', async () => {
+      const panel = $id('b3Capabilities');
+      panel.hidden = !panel.hidden;
+      $id('b3CanDo').setAttribute('aria-expanded', String(!panel.hidden));
+      if (panel.hidden || panel.childElementCount) return;
+      panel.textContent = 'Loading capabilities…';
+      try {
+        const result = await AIOS.api.get('/api/jarvis/capabilities');
+        panel.textContent = '';
+        for (const group of result.capabilities || []) {
+          const heading = document.createElement('h3'); heading.textContent = group.name; panel.appendChild(heading);
+          const description = document.createElement('p'); description.textContent = group.description; panel.appendChild(description);
+          for (const example of group.examples || []) {
+            const button = document.createElement('button'); button.textContent = example;
+            button.addEventListener('click', () => { ask.value = example; ask.focus(); panel.hidden = true; $id('b3CanDo').setAttribute('aria-expanded', 'false'); });
+            panel.appendChild(button);
+          }
+        }
+      } catch { panel.textContent = 'Capabilities are unavailable. Try again in a moment.'; }
+    });
+    const activityNames = { list_projects_local: 'Finding your projects', get_project_context: 'Inspecting the project', search_project_files: 'Searching project files', read_project_file: 'Reading source code', edit_project_file: 'Applying and checking the edit', get_day_briefing: 'Preparing your briefing', read_window_text: 'Reading the window', set_ui_field: 'Filling and checking the field', scan_desktop: 'Looking at your desktop', inspect_screen_ui: 'Inspecting the controls', capture_screen: 'Checking the screen', create_personal_note: 'Saving your note', get_jarvis_routine: 'Loading your routine', save_jarvis_routine: 'Saving your routine', create_local_reminder: 'Setting your reminder', snooze_local_reminder: 'Snoozing your reminder', web_search: 'Researching the web' };
+    AIOS.bus.on('jarvis:task-start', () => { $id('b3Activity').textContent = 'Thinking…'; $id('b3Stop').hidden = false; });
+    AIOS.bus.on('jarvis:activity', (event) => {
+      const name = String(event.tool || '').split('.').pop();
+      const label = activityNames[name] || name.replace(/_/g, ' ');
+      $id('b3Activity').textContent = (event.event === 'denied' || event.ok === false) ? label + ' — needs attention' : label + (event.event === 'completed' ? ' · done' : '…');
+    });
+    AIOS.bus.on('jarvis:reply', () => { $id('b3Activity').textContent = 'Finished'; $id('b3Stop').hidden = true; });
+    AIOS.bus.on('jarvis:error', () => { $id('b3Activity').textContent = 'Needs attention'; $id('b3Stop').hidden = true; });
     AIOS.bus.on('jarvis:reply', (r) => { if (visible && r) caption(r.a); });
+    AIOS.bus.on('jarvis:delta', (text) => { if (visible) caption(text); });
+    AIOS.bus.on('jarvis:error', (text) => { if (visible) caption(text); });
     AIOS.bus.on('jarvis:state', (s) => { hudState = s; if (micBtn) micBtn.classList.toggle('live', s === 'listening'); });
     startHud();
   }
@@ -173,7 +218,17 @@
   function caption(text) {
     const el = $id('b3Caption');
     if (!el) return;
-    el.textContent = String(text || '').slice(0, 320);
+    // Build only text and validated links; model output is never HTML.
+    const value = String(text || '').slice(0, 8000);
+    el.textContent = '';
+    const links = /\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g;
+    let match, cursor = 0;
+    while ((match = links.exec(value))) {
+      el.appendChild(document.createTextNode(value.slice(cursor, match.index)));
+      const link = document.createElement('a'); link.textContent = match[1]; link.href = match[2]; link.target = '_blank'; link.rel = 'noopener noreferrer';
+      el.appendChild(link); cursor = match.index + match[0].length;
+    }
+    el.appendChild(document.createTextNode(value.slice(cursor)));
     el.classList.add('show');
   }
 

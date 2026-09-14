@@ -42,6 +42,7 @@ const { readBrief, generateBrief, readBriefHistory, isBriefGenerating } = requir
 const { synthesizeAudio, listVoices, listElevenLabsVoices, TTS_VOICE, TTS_PROVIDER, ELEVENLABS_ENABLED, ELEVENLABS_VOICE_ID, ELEVENLABS_MODEL_ID, ACK_LINES, ackPath, FILLER_LINES, fillerPath } = require('./lib/jarvis');
 const { codexChat, codexChatStream, getCodexStatus, initializeCodex, resetCodexThread } = require('./lib/codex-brain');
 const { tryDirectLocalTool } = require('./lib/jarvis-tools');
+const { approvalReason } = require('./lib/jarvis-approval-policy');
 const { CLAUDE, buildSpawn, ptyEnv } = require('./lib/claude');
 
 // ---------------------------------------------------------------------------
@@ -344,14 +345,16 @@ app.post('/api/jarvis/chat', express.json({ limit: '32kb' }), async (req, res) =
   const message = typeof body.message === 'string' ? body.message : '';
   const history = Array.isArray(body.history) ? body.history : [];
   if (!message.trim()) return res.status(400).json({ error: 'empty message' });
+  const aborter = new AbortController();
+  res.on('close', () => { if (!res.writableEnded) aborter.abort(); });
   try {
     const direct = await tryDirectLocalTool(message);
     const result = direct && direct.reply
       ? { reply: direct.reply, provider: 'local-direct', model: null, latencyMs: 0, ttftMs: 0 }
-      : await codexChat(message, history);
+      : await codexChat(message, history, { signal: aborter.signal });
     res.json({ ...result, at: new Date().toISOString() });
   } catch (e) {
-    res.status(502).json({ error: String((e && e.message) || e) });
+    if (!res.destroyed) res.status(e.code === 'BUSY' ? 409 : 502).json({ error: String((e && e.message) || e), code: e.code || 'BRAIN_ERROR' });
   }
 });
 
@@ -408,7 +411,7 @@ app.post('/api/jarvis/chat-stream', express.json({ limit: '32kb' }), async (req,
     const direct = await tryDirectLocalTool(message);
     const result = direct && direct.reply
       ? { reply: direct.reply, provider: 'local-direct', model: null, latencyMs: Math.round(performance.now() - started), ttftMs: 0 }
-      : await codexChatStream(message, history, onDelta, { signal: aborter.signal });
+      : await codexChatStream(message, history, onDelta, { signal: aborter.signal, onStatus: (status) => sse({ type: 'status', ...status }) });
     if (direct && direct.reply) onDelta(direct.reply);
     recordJarvisEvent('brain.done', {
       provider: result.provider, ms: result.latencyMs, ttftMs: result.ttftMs,
@@ -417,12 +420,13 @@ app.post('/api/jarvis/chat-stream', express.json({ limit: '32kb' }), async (req,
   } catch (e) {
     const error = String((e && e.message) || e);
     recordJarvisEvent('brain.error', { error: error.slice(0, 160) });
-    sse({ type: 'error', error });
+    sse({ type: 'error', error, code: e.code || 'BRAIN_ERROR' });
   }
   if (!responseClosed && !res.writableEnded) res.end();
 });
 
 app.get('/api/jarvis/brain-status', (req, res) => res.json(getCodexStatus()));
+app.get('/api/jarvis/capabilities', (req, res) => res.json({ capabilities: require('./lib/jarvis-capabilities').catalogue, webSearch: getCodexStatus().webSearch }));
 app.post('/api/jarvis/brain-reset', async (req, res) => {
   try { res.json({ ok: true, brain: await resetCodexThread() }); }
   catch (e) {
@@ -446,34 +450,6 @@ function approvalBroadcast(obj) {
   for (const client of approvalClients) { try { client.write(line); } catch { /* gone */ } }
 }
 
-// Risk classifier — default is ALLOW so Jarvis stops nagging (Yish's call). Only
-// genuinely irreversible / external / money actions still pop the gate, which is
-// the SOUL.md hard line: never send, post, spend, or delete without an explicit
-// yes. Everything else (reads, CRM lookups, file writes, opening apps, safe
-// commands, running skills) auto-approves silently.
-function isRisky(tool, input) {
-  const t = String(tool || '');
-  // external send / publish / spend via any connected service (MCP tools)
-  if (/(send|post|publish|tweet|email|reply.*send|pay|purchase|checkout|charge|delete|remove|trash)/i.test(t)) return true;
-  if (input && (input.allowSensitive === true || input.allowSensitive === 'true')) return true;
-  const intent = [input && input.intent, input && input.name, input && input.target, input && input.keys]
-    .filter(Boolean).join(' ');
-  if (/\b(send|submit|post|publish|tweet|pay|purchase|checkout|charge|delete|remove|trash|close|quit|exit|sign\s*out|log\s*out)\b/i.test(intent)) return true;
-  const cmd = String((input && (input.command || input.cmd)) || '');
-  if (cmd) {
-    // destructive or outbound shell — deletes, force-resets, pushes, POSTs, power, publishes
-    if (/\b(rm|del|erase|rmdir|rd)\b/i.test(cmd)) return true;
-    if (/Remove-Item|Clear-Content|Clear-Recyclebin/i.test(cmd)) return true;
-    if (/git\s+(push|reset\s+--hard|clean\s+-\w*f)/i.test(cmd)) return true;
-    if (/\b(format|shutdown|restart-computer|stop-computer)\b/i.test(cmd)) return true;
-    if (/npm\s+publish|(^|\s)gh\s+(pr|release)\s+(create|merge)/i.test(cmd)) return true;
-    if (/-Method\s+(Post|Put|Delete)|curl[^|]*-X\s*(POST|PUT|DELETE)/i.test(cmd)) return true;
-    if (/crm-delete/i.test(cmd)) return true;
-    return false; // any other command is treated as safe/reversible
-  }
-  return false;
-}
-
 app.post('/api/jarvis/approval-request', express.json({ limit: '64kb' }), async (req, res) => {
   const body = req.body || {};
   const risk = ['read', 'write', 'open', 'execute', 'screen', 'control', 'external', 'destructive', 'money', 'unknown'].includes(String(body.risk))
@@ -486,12 +462,13 @@ app.post('/api/jarvis/approval-request', express.json({ limit: '64kb' }), async 
     summary: String(body.summary || '').slice(0, 240),
     at: new Date().toISOString(),
   };
-  const requiresApproval = body.require_approval === true || isRisky(info.tool, info.input);
+  const reason = body.require_approval === true ? 'tool-policy' : approvalReason(info.tool, info.input);
+  const requiresApproval = !!reason;
   if (!requiresApproval) {
     recordJarvisEvent('approval.auto', { tool: info.tool, risk: info.risk });
     return res.json({ allow: true, mode: 'preauthorized-local' });
   }
-  recordJarvisEvent('approval.requested', { tool: info.tool, risk: info.risk });
+  recordJarvisEvent('approval.requested', { tool: info.tool, risk: info.risk, reason });
   const decision = await new Promise((resolve) => {
     const timer = setTimeout(() => {
       pendingApprovals.delete(info.id);
@@ -514,6 +491,7 @@ app.post('/api/jarvis/tool-event', express.json({ limit: '8kb' }), (req, res) =>
   if (body.ok !== undefined) fields.ok = !!body.ok;
   const event = String(body.event || 'event').replace(/[^a-z0-9_.-]/gi, '').slice(0, 40);
   recordJarvisEvent('tool.' + event, fields);
+  if (Number(body.ownerPid) === process.pid) approvalBroadcast({ type: 'tool-activity', event, ...fields });
   res.json({ ok: true });
 });
 
@@ -602,20 +580,11 @@ setInterval(() => pollLeadNudges().catch(() => {}), 5 * 60 * 1000);
 const JARVIS_REMINDERS_FILE = path.resolve(process.env.JARVIS_REMINDERS_FILE || path.join(AIOS_DATA_DIR, 'jarvis-reminders.json'));
 let reminderPollBusy = false;
 async function pollReminderNudges() {
-  if (reminderPollBusy) return;
+  if (reminderPollBusy || !approvalClients.size) return;
   reminderPollBusy = true;
   try {
-    let store;
-    try { store = JSON.parse(await fsp.readFile(JARVIS_REMINDERS_FILE, 'utf8')); }
-    catch { return; }
-    const reminders = Array.isArray(store.reminders) ? store.reminders : [];
-    const now = Date.now();
-    const due = reminders.filter((item) => item && item.status === 'pending' && !item.firedAt && Number.isFinite(Date.parse(item.dueAt)) && Date.parse(item.dueAt) <= now).slice(0, 5);
+    const due = await require('./lib/jarvis-capabilities').personal.claimDue();
     if (!due.length) return;
-    const firedAt = new Date().toISOString();
-    for (const item of due) item.firedAt = firedAt;
-    store.updatedAt = firedAt;
-    await writeJsonAtomic(JARVIS_REMINDERS_FILE, store);
     for (const item of due) {
       const title = String(item.title || 'Reminder').slice(0, 180);
       const note = String(item.note || '').slice(0, 220);
@@ -642,7 +611,7 @@ app.post('/api/jarvis/approval-response', express.json({ limit: '16kb' }), (req,
 // the frontend know whether offline STT is available (else it uses browser voice).
 const VOICE_SERVICE = process.env.JARVIS_VOICE_URL || 'http://127.0.0.1:3100';
 
-app.get('/api/jarvis/voice-status', async (req, res) => {
+async function refreshVoiceStatus() {
   const started = performance.now();
   try {
     const r = await fetch(VOICE_SERVICE + '/health', { signal: AbortSignal.timeout(2000) });
@@ -652,14 +621,16 @@ app.get('/api/jarvis/voice-status', async (req, res) => {
       audioAgeSec: j && j.audioAgeSec, latencyMs: Math.round(performance.now() - started),
       checkedAt: new Date().toISOString(),
     };
-    res.json({ ...jarvisRuntime.voiceStatus, tts: TTS_PROVIDER, elevenlabs: ELEVENLABS_ENABLED });
   } catch (e) {
     jarvisRuntime.voiceStatus = {
       stt: false, error: String((e && e.message) || e),
       latencyMs: Math.round(performance.now() - started), checkedAt: new Date().toISOString(),
     };
-    res.json({ ...jarvisRuntime.voiceStatus, tts: TTS_PROVIDER, elevenlabs: ELEVENLABS_ENABLED });
   }
+  return { ...jarvisRuntime.voiceStatus, tts: TTS_PROVIDER, elevenlabs: ELEVENLABS_ENABLED };
+}
+app.get('/api/jarvis/voice-status', async (req, res) => {
+  res.json(await refreshVoiceStatus());
 });
 
 // Coordinated listening: JarvisVoice keeps the one physical mic stream and
@@ -694,9 +665,12 @@ app.post('/api/jarvis/listen-stream', async (req, res) => {
   const followup = String(req.query.followup || '') === '1';
   const started = performance.now();
   recordJarvisEvent('listen.stream.start', { followup });
+  const aborter = new AbortController();
+  const timer = setTimeout(() => aborter.abort(), 40000);
+  res.on('close', () => { if (!res.writableEnded) aborter.abort(); });
   try {
     const r = await fetch(VOICE_SERVICE + '/listen/stream?followup=' + (followup ? '1' : '0'), {
-      method: 'POST', signal: AbortSignal.timeout(70000),
+      method: 'POST', signal: aborter.signal,
     });
     res.status(r.status);
     res.setHeader('Content-Type', r.headers.get('content-type') || 'application/x-ndjson');
@@ -728,9 +702,11 @@ app.post('/api/jarvis/listen-stream', async (req, res) => {
         res.write(JSON.stringify({ type: 'error', speech: false, reason: 'voice-service-unreachable', error }) + '\n');
         res.end();
       }
-    } else {
+    } else if (!res.destroyed) {
       res.status(502).json({ type: 'error', text: '', speech: false, reason: 'voice-service-unreachable', error });
     }
+  } finally {
+    clearTimeout(timer);
   }
 });
 
@@ -766,15 +742,17 @@ app.post('/api/jarvis/telemetry', express.json({ limit: '16kb' }), (req, res) =>
   res.json({ ok: true });
 });
 
-app.get('/api/jarvis/diagnostics', (req, res) => {
+app.get('/api/jarvis/diagnostics', async (req, res) => {
   const scheduled = performance.now();
-  setTimeout(() => {
+  setTimeout(async () => {
+    const eventLoopLagMs = Math.round(performance.now() - scheduled);
+    const voice = await refreshVoiceStatus();
     res.json({
       startedAt: jarvisRuntime.startedAt,
       uptimeSec: Math.round(process.uptime()),
-      eventLoopLagMs: Math.round(performance.now() - scheduled),
+      eventLoopLagMs,
       brain: getCodexStatus(),
-      voice: jarvisRuntime.voiceStatus,
+      voice,
       events: jarvisRuntime.events.slice(-80),
       requests: jarvisRuntime.requests.slice(-50),
     });
@@ -798,8 +776,10 @@ app.post('/api/jarvis/tts', express.json({ limit: '32kb' }), async (req, res) =>
   const body = req.body || {};
   const text = typeof body.text === 'string' ? body.text : '';
   if (!text.trim()) return res.status(400).json({ error: 'empty text' });
+  const aborter = new AbortController();
+  res.on('close', () => { if (!res.writableEnded) aborter.abort(); });
   try {
-    const audio = await synthesizeAudio(text, { voice: body.voice, rate: body.rate });
+    const audio = await synthesizeAudio(text, { voice: body.voice, rate: body.rate, signal: aborter.signal });
     res.setHeader('Content-Type', audio.contentType || 'audio/wav');
     res.setHeader('X-Jarvis-TTS-Provider', audio.provider || 'local');
     res.setHeader('Cache-Control', 'no-store');

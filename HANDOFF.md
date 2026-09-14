@@ -1,5 +1,11 @@
 # Handoff
 
+JARVIS approval correction, 13 September 2026: ordinary keyboard input and search submission now auto-approve; the old filter incorrectly matched `send_hotkey`. Consequential actions retain approval. Contract version 3 is active, all 18 tests pass, and eight live decision checks passed. See the approval correction in `C:\Dev\Jarvis\CAPABILITIES-2026-09-13.md`; evidence/backups are in `C:\Dev\.codex-staging\jarvis-approval-fix`.
+
+JARVIS capability update, 13 September 2026: see `C:\Dev\Jarvis\CAPABILITIES-2026-09-13.md` for the computer, personal, project and research workflows, 64-tool catalogue, validation and limitations. This builds on the optimization below. Changes remain local and uncommitted.
+
+JARVIS update, 13 September 2026: see `C:\Dev\Jarvis\OPTIMIZATION-2026-09-13.md` for architecture, fixes, benchmarks, live verification and rollback. The repaired Codex login, cancellation, command routing, speech queue and Flash voice are running locally. Implementation changes remain uncommitted. The older project handoff below is retained for context.
+
 Last updated:
 - 2026-07-07 by Codex
 - 2026-07-02 by Codex

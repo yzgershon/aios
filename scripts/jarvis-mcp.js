@@ -45,6 +45,8 @@ function toolSchemas() {
 }
 
 function approvalInput(name, args) {
+  if (name === 'edit_project_file') return { project: args.project, path: args.path, create: args.create, expectedSha256: args.expectedSha256, replacementChars: String(args.replacement || '').length };
+  if (name === 'set_ui_field') return { handle: args.handle, automationId: args.automationId, name: args.name, intent: args.intent, allowSensitive: args.allowSensitive, textChars: String(args.text || '').length };
   if (name === 'write_local_file') {
     return {
       path: args.path,
@@ -101,6 +103,7 @@ async function recordToolEvent(event, name, policy, fields = {}) {
     await postJson('/api/jarvis/tool-event', {
       event,
       tool: name,
+      ownerPid: Number(process.env.JARVIS_OWNER_PID) || 0,
       risk: policy.risk,
       ...fields,
     }, 2500);
